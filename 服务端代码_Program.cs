@@ -400,6 +400,133 @@ app.MapPost("/api/createPlayer", async ([FromBody] CreatePlayerRequest 请求) =
     }
 });
 
+// =================== 获取国家列表接口：GET /api/countries ===================
+
+app.MapGet("/api/countries", async () =>
+{
+    try
+    {
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        using var command = new MySqlCommand(
+            @"SELECT id, name, code, declaration, announcement, copper_money, food, gold
+              FROM countries
+              ORDER BY id",
+            connection
+        );
+
+        using var reader = await command.ExecuteReaderAsync();
+
+        var 列表 = new List<CountrySummary>();
+
+        while (await reader.ReadAsync())
+        {
+            var 国家 = new CountrySummary
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.GetString(1),
+                Code = reader.GetString(2),
+                Declaration = reader.IsDBNull(3) ? "" : reader.GetString(3),
+                Announcement = reader.IsDBNull(4) ? "" : reader.GetString(4),
+                CopperMoney = reader.GetInt32(5),
+                Food = reader.GetInt32(6),
+                Gold = reader.GetInt32(7)
+            };
+
+            列表.Add(国家);
+        }
+
+        return Results.Ok(new CountryListResponse(true, "获取国家列表成功", 列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new CountryListResponse(false, "服务器错误: " + ex.Message, new List<CountrySummary>()));
+    }
+});
+
+// =================== 加入国家接口：POST /api/joinCountry ===================
+
+app.MapPost("/api/joinCountry", async ([FromBody] JoinCountryRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0 || 请求.CountryId <= 0)
+        {
+            return Results.Ok(new JoinCountryResponse(false, "账号ID或国家ID无效"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 检查国家是否存在
+        using (var checkCountryCmd = new MySqlCommand(
+            "SELECT COUNT(*) FROM countries WHERE id = @country_id",
+            connection))
+        {
+            checkCountryCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
+            var countryCountObj = await checkCountryCmd.ExecuteScalarAsync();
+            long countryCount = countryCountObj != null ? (long)countryCountObj : 0;
+
+            if (countryCount == 0)
+            {
+                return Results.Ok(new JoinCountryResponse(false, "指定的国家不存在"));
+            }
+        }
+
+        // 查找该账号对应的玩家
+        int 玩家ID = -1;
+        int 当前国家ID = -1;
+
+        using (var findPlayerCmd = new MySqlCommand(
+            "SELECT id, country_id FROM players WHERE account_id = @account_id LIMIT 1",
+            connection))
+        {
+            findPlayerCmd.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+            using var reader = await findPlayerCmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                玩家ID = reader.GetInt32(0);
+                当前国家ID = reader.IsDBNull(1) ? -1 : reader.GetInt32(1);
+            }
+            else
+            {
+                return Results.Ok(new JoinCountryResponse(false, "该账号尚未创建角色"));
+            }
+        }
+
+        // 如果已经在这个国家，就直接返回成功
+        if (当前国家ID == 请求.CountryId)
+        {
+            return Results.Ok(new JoinCountryResponse(true, "你已经在该国家中"));
+        }
+
+        // 更新玩家的国家ID
+        using (var updateCmd = new MySqlCommand(
+            "UPDATE players SET country_id = @country_id WHERE id = @player_id",
+            connection))
+        {
+            updateCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
+            updateCmd.Parameters.AddWithValue("@player_id", 玩家ID);
+
+            int rows = await updateCmd.ExecuteNonQueryAsync();
+            if (rows > 0)
+            {
+                return Results.Ok(new JoinCountryResponse(true, "加入国家成功"));
+            }
+            else
+            {
+                return Results.Ok(new JoinCountryResponse(false, "加入国家失败，未能更新玩家数据"));
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new JoinCountryResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -435,6 +562,12 @@ public record GetPlayerResponse(bool Success, string Message, PlayerData? Data);
 public record CreatePlayerRequest(int AccountId, string Name, string Gender);
 
 public record CreatePlayerResponse(bool Success, string Message);
+
+public record CountryListResponse(bool Success, string Message, List<CountrySummary> Data);
+
+public record JoinCountryRequest(int AccountId, int CountryId);
+
+public record JoinCountryResponse(bool Success, string Message);
 
 // 玩家数据（用于API返回）
 public class PlayerData
@@ -474,5 +607,17 @@ public class ClanData
 {
     public int Id { get; set; }
     public string Name { get; set; } = "";
+}
+
+public class CountrySummary
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public string Code { get; set; } = "";
+    public string Declaration { get; set; } = "";
+    public string Announcement { get; set; } = "";
+    public int CopperMoney { get; set; }
+    public int Food { get; set; }
+    public int Gold { get; set; }
 }
 
