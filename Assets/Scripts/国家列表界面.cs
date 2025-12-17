@@ -180,6 +180,9 @@ public class 国家列表界面 : MonoBehaviour
                     {
                         玩家管理.获取玩家数据(accountId);
                     }
+
+                    // 成功加入后，关闭当前国家列表界面的 UI
+                    gameObject.SetActive(false);
                 }
                 else
                 {

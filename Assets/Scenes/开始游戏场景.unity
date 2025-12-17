@@ -3686,9 +3686,9 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 0}
-        m_TargetAssemblyTypeName: "\u663E\u793A\u56FD\u5BB6\u5217\u8868, Assembly-CSharp"
-        m_MethodName: "\u8FDB\u5165\u6E38\u620F"
+      - m_Target: {fileID: 4048315733172711365}
+        m_TargetAssemblyTypeName: "\u56FD\u5BB6\u5217\u8868\u754C\u9762, Assembly-CSharp"
+        m_MethodName: "\u52A0\u5165\u56FD\u5BB6"
         m_Mode: 1
         m_Arguments:
           m_ObjectArgument: {fileID: 0}
@@ -4407,7 +4407,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   "\u7236\u5BF9\u8C61": {fileID: 4048315732507431368}
   "\u8981\u514B\u9686\u7684\u5BF9\u8C61": {fileID: 4048315733329387478}
-  "\u63D0\u793A\u6587\u672C": {fileID: 0}
   "\u73A9\u5BB6\u7BA1\u7406": {fileID: 346922750}
   "\u56FD\u5BB6\u5217\u8868\u5730\u5740": http://43.139.181.191:5000/api/countries
   "\u52A0\u5165\u56FD\u5BB6\u5730\u5740": http://43.139.181.191:5000/api/joinCountry
