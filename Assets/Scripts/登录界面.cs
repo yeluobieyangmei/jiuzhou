@@ -98,6 +98,9 @@ public class 登录界面 : MonoBehaviour
                                 玩家管理 = 管理对象.AddComponent<玩家数据管理>();
                             }
                             玩家管理.获取玩家数据(结果.accountId);
+
+                            // 登录成功后，关闭登录界面 UI
+                            gameObject.SetActive(false);
                         }
                         else
                         {

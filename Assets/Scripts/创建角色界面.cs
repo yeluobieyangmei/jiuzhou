@@ -4,59 +4,32 @@ using UnityEngine.UI;
 public class 创建角色界面 : MonoBehaviour
 {
     [Header("UI 引用")]
-    public GameObject 创建角色面板;  // 整个面板（用于显示/隐藏）
     public InputField 姓名输入框;
-    public Button 男性按钮;
-    public Button 女性按钮;
-    public Button 创建按钮;
     public Text 提示文本;
 
     private string 当前选择的性别 = "男";
     private int 当前账号ID;
 
-    void Start()
-    {
-        // 默认隐藏面板
-        if (创建角色面板 != null)
-            创建角色面板.SetActive(false);
-
-        // 绑定按钮事件
-        if (男性按钮 != null)
-            男性按钮.onClick.AddListener(() => 选择性别("男"));
-        if (女性按钮 != null)
-            女性按钮.onClick.AddListener(() => 选择性别("女"));
-        if (创建按钮 != null)
-            创建按钮.onClick.AddListener(点击创建角色);
-    }
-
     /// <summary>
-    /// 显示创建角色面板（当检测到账号没有角色时调用）
+    /// 由 玩家数据管理 在需要创建角色时调用，设置当前账号ID
     /// </summary>
-    public void 显示创建角色面板(int accountId)
+    public void 设置账号ID(int accountId)
     {
         当前账号ID = accountId;
-        if (创建角色面板 != null)
-            创建角色面板.SetActive(true);
-        if (提示文本 != null)
-            提示文本.text = "请创建您的角色";
-        
-        // 重置输入框
-        if (姓名输入框 != null)
-            姓名输入框.text = "";
-        
-        // 默认选择男性
-        当前选择的性别 = "男";
     }
 
-    void 选择性别(string 性别)
+    public void 选择男性()
     {
-        当前选择的性别 = 性别;
-        Debug.Log($"选择了性别：{性别}");
-        
-        // 可以在这里更新按钮的视觉反馈（比如高亮选中的按钮）
+        当前选择的性别 = "男";
+        Debug.Log($"选择了性别：男");
+    }
+    public void 选择女性()
+    {
+        当前选择的性别 = "女";
+        Debug.Log($"选择了性别：女");
     }
 
-    void 点击创建角色()
+    public void 点击创建角色()
     {
         string 姓名 = 姓名输入框 != null ? 姓名输入框.text.Trim() : "";
 
@@ -89,15 +62,6 @@ public class 创建角色界面 : MonoBehaviour
             if (提示文本 != null)
                 提示文本.text = "系统错误：找不到玩家数据管理";
         }
-    }
-
-    /// <summary>
-    /// 隐藏创建角色面板（创建成功后调用）
-    /// </summary>
-    public void 隐藏创建角色面板()
-    {
-        if (创建角色面板 != null)
-            创建角色面板.SetActive(false);
     }
 }
 

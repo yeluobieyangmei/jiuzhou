@@ -11,6 +11,9 @@ public class 玩家数据管理 : MonoBehaviour
     private string 获取玩家地址 = "http://43.139.181.191:5000/api/getPlayer";
     private string 创建玩家地址 = "http://43.139.181.191:5000/api/createPlayer";
 
+    public 创建角色界面 创建界面;
+    public 显示角色信息界面 显示角色信息界面;
+
     // 当前玩家数据（从服务器加载后存储在这里）
     public 玩家数据 当前玩家数据 { get; private set; }
 
@@ -62,23 +65,34 @@ public class 玩家数据管理 : MonoBehaviour
                         转换并保存玩家数据(响应.data);
                         Debug.Log("玩家数据加载成功！");
                         
-                        // 显示角色信息界面
-                        显示角色信息界面 信息界面 = FindObjectOfType<显示角色信息界面>();
-                        if (信息界面 != null)
+                        if (创建界面 != null)
                         {
-                            信息界面.显示角色信息(当前玩家数据);
+                            创建界面.gameObject.SetActive(false);
+                        }
+
+                        // 显示角色信息界面
+                        if (显示角色信息界面 != null)
+                        {
+                            显示角色信息界面.gameObject.SetActive(true);
+                            显示角色信息界面.显示角色信息(当前玩家数据);
                         }
                     }
                     else
                     {
                         // 没有角色，需要创建
                         Debug.Log("该账号尚未创建角色，需要创建角色");
-                        
-                        // 显示创建角色界面
-                        创建角色界面 创建界面 = FindObjectOfType<创建角色界面>();
+
+                        // 隐藏角色信息界面（如果有）
+                        if (显示角色信息界面 != null)
+                        {
+                            显示角色信息界面.gameObject.SetActive(false);
+                        }
+
+                        // 显示创建角色界面，并传入账号ID
                         if (创建界面 != null)
                         {
-                            创建界面.显示创建角色面板(accountId);
+                            创建界面.gameObject.SetActive(true);
+                            创建界面.设置账号ID(accountId);
                         }
                         else
                         {
@@ -121,10 +135,9 @@ public class 玩家数据管理 : MonoBehaviour
                         Debug.Log("角色创建成功！");
                         
                         // 隐藏创建角色界面
-                        创建角色界面 创建界面 = FindObjectOfType<创建角色界面>();
                         if (创建界面 != null)
                         {
-                            创建界面.隐藏创建角色面板();
+                            创建界面.gameObject.SetActive(false);
                         }
                         
                         // 创建成功后，重新获取玩家数据（会自动显示角色信息界面）
@@ -135,7 +148,6 @@ public class 玩家数据管理 : MonoBehaviour
                         Debug.LogError("创建角色失败: " + 响应.message);
                         
                         // 创建失败时，在创建角色界面的提示文本中显示错误信息
-                        创建角色界面 创建界面 = FindObjectOfType<创建角色界面>();
                         if (创建界面 != null && 创建界面.提示文本 != null)
                         {
                             创建界面.提示文本.text = "创建失败：" + 响应.message;
