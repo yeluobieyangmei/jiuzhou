@@ -9,6 +9,7 @@ public class 创建角色界面 : MonoBehaviour
 
     private string 当前选择的性别 = "男";
     private int 当前账号ID;
+    public 国家列表界面 国家列表界面;
 
     /// <summary>
     /// 由 玩家数据管理 在需要创建角色时调用，设置当前账号ID
@@ -55,6 +56,7 @@ public class 创建角色界面 : MonoBehaviour
         if (玩家管理 != null)
         {
             玩家管理.创建角色(当前账号ID, 姓名, 当前选择的性别);
+            国家列表界面.gameObject.SetActive(true);
         }
         else
         {
