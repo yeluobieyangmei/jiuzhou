@@ -527,6 +527,71 @@ app.MapPost("/api/joinCountry", async ([FromBody] JoinCountryRequest 请求) =>
     }
 });
 
+// =================== 获取国家信息接口（成员总数 + 排名）：POST /api/getCountryInfo ===================
+
+app.MapPost("/api/getCountryInfo", async ([FromBody] GetCountryInfoRequest 请求) =>
+{
+    try
+    {
+        if (请求.CountryId <= 0)
+        {
+            return Results.Ok(new GetCountryInfoResponse(false, "国家ID无效", 0, 0));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 检查国家是否存在
+        using (var checkCountryCmd = new MySqlCommand(
+            "SELECT COUNT(*) FROM countries WHERE id = @country_id",
+            connection))
+        {
+            checkCountryCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
+            var countryCountObj = await checkCountryCmd.ExecuteScalarAsync();
+            long countryCount = countryCountObj != null ? (long)countryCountObj : 0;
+
+            if (countryCount == 0)
+            {
+                return Results.Ok(new GetCountryInfoResponse(false, "指定的国家不存在", 0, 0));
+            }
+        }
+
+        int 成员总数 = 0;
+        int 排名 = 0;
+
+        // 统计该国家的成员总数（基于 players 表）
+        using (var countCmd = new MySqlCommand(
+            "SELECT COUNT(*) FROM players WHERE country_id = @country_id",
+            connection))
+        {
+            countCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
+            var memberCountObj = await countCmd.ExecuteScalarAsync();
+            long memberCount = memberCountObj != null ? (long)memberCountObj : 0;
+            成员总数 = (int)memberCount;
+        }
+
+        // 计算该国家的排名（按照黄金从高到低排序，相同黄金用 id 作为次排序）
+        using (var rankCmd = new MySqlCommand(
+            @"SELECT COUNT(*) + 1 
+              FROM countries 
+              WHERE gold > (SELECT gold FROM countries WHERE id = @country_id)
+                 OR (gold = (SELECT gold FROM countries WHERE id = @country_id) AND id < @country_id)",
+            connection))
+        {
+            rankCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
+            var rankObj = await rankCmd.ExecuteScalarAsync();
+            long rankVal = rankObj != null ? (long)rankObj : 0;
+            排名 = (int)rankVal;
+        }
+
+        return Results.Ok(new GetCountryInfoResponse(true, "获取国家信息成功", 成员总数, 排名));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetCountryInfoResponse(false, "服务器错误: " + ex.Message, 0, 0));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -568,6 +633,10 @@ public record CountryListResponse(bool Success, string Message, List<CountrySumm
 public record JoinCountryRequest(int AccountId, int CountryId);
 
 public record JoinCountryResponse(bool Success, string Message);
+
+public record GetCountryInfoRequest(int CountryId);
+
+public record GetCountryInfoResponse(bool Success, string Message, int MemberCount, int Rank);
 
 // 玩家数据（用于API返回）
 public class PlayerData

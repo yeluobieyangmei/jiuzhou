@@ -7,6 +7,8 @@ using 国家系统;
 
 public class 玩家数据管理 : MonoBehaviour
 {
+    public static 玩家数据管理 实例 { get; private set; }
+
     [Header("接口地址")]
     private string 获取玩家地址 = "http://43.139.181.191:5000/api/getPlayer";
     private string 创建玩家地址 = "http://43.139.181.191:5000/api/createPlayer";
@@ -16,6 +18,19 @@ public class 玩家数据管理 : MonoBehaviour
 
     // 当前玩家数据（从服务器加载后存储在这里）
     public 玩家数据 当前玩家数据 { get; private set; }
+
+    private void Awake()
+    {
+        // 简单单例：跨场景持久存在，避免重复创建
+        if (实例 != null && 实例 != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+
+        实例 = this;
+        DontDestroyOnLoad(gameObject);
+    }
 
     /// <summary>
     /// 获取玩家数据（登录成功后调用）
@@ -201,6 +216,15 @@ public class 玩家数据管理 : MonoBehaviour
         // 国家信息（如果有，countryId > 0 表示有国家）
         if (服务端数据.country != null && 服务端数据.countryId > 0)
         {
+            // 如果玩家原来有国家且不同于现在的国家，需要从原国家成员表中移除
+            if (当前玩家数据.国家 != null && 当前玩家数据.国家.国家ID != 服务端数据.countryId)
+            {
+                if (当前玩家数据.国家.国家成员表.Contains(当前玩家数据))
+                {
+                    当前玩家数据.国家.国家成员表.Remove(当前玩家数据);
+                }
+            }
+
             // 从全局变量中查找国家，如果不存在则创建
             国家信息库 国家 = 全局方法类.获取指定名字的国家(服务端数据.country.name);
             if (国家 == null)
@@ -211,10 +235,24 @@ public class 玩家数据管理 : MonoBehaviour
                 国家.国号 = 服务端数据.country.code;
                 全局变量.所有国家列表.Add(国家);
             }
+
+            // 把玩家加入到该国家的成员表中（如果还没有）
+            if (!国家.国家成员表.Contains(当前玩家数据))
+            {
+                国家.国家成员表.Add(当前玩家数据);
+            }
+
             当前玩家数据.国家 = 国家;
         }
         else
         {
+            // 如果服务端返回没有国家，但本地还有旧国家引用，需要从旧国家成员表中移除
+            if (当前玩家数据.国家 != null &&
+                当前玩家数据.国家.国家成员表.Contains(当前玩家数据))
+            {
+                当前玩家数据.国家.国家成员表.Remove(当前玩家数据);
+            }
+
             当前玩家数据.国家 = null;
         }
 

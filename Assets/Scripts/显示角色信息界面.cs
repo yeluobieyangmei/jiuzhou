@@ -10,9 +10,6 @@ public class 显示角色信息界面 : MonoBehaviour
     public Text 名字文本;
     public Text 国家文本;
 
-    [Header("场景设置")]
-    public string 主场景名称 = "游戏主场景"; // 在 Inspector 里设置实际主场景名
-
     /// <summary>
     /// 显示角色信息（当获取到玩家数据后调用）
     /// </summary>
@@ -40,14 +37,8 @@ public class 显示角色信息界面 : MonoBehaviour
     /// </summary>
     public void 点击进入角色()
     {
-        if (string.IsNullOrEmpty(主场景名称))
-        {
-            Debug.LogError("主场景名称未设置，请在 Inspector 中设置主场景名称");
-            return;
-        }
-
-        Debug.Log($"加载主场景：{主场景名称}");
-        SceneManager.LoadScene(主场景名称);
+        Debug.Log($"加载主场景");
+        SceneManager.LoadScene("主界面场景");
     }
 }
 
