@@ -15,6 +15,7 @@ public class 玩家数据管理 : MonoBehaviour
 
     public 创建角色界面 创建界面;
     public 显示角色信息界面 显示角色信息界面;
+    public 国家信息显示 国家信息显示; // 主场景的国家信息显示组件
 
     // 当前玩家数据（从服务器加载后存储在这里）
     public 玩家数据 当前玩家数据 { get; private set; }
@@ -225,15 +226,40 @@ public class 玩家数据管理 : MonoBehaviour
                 }
             }
 
-            // 从全局变量中查找国家，如果不存在则创建
-            国家信息库 国家 = 全局方法类.获取指定名字的国家(服务端数据.country.name);
+            // 优先通过国家ID从全局变量中查找国家（这样能找到完整信息）
+            国家信息库 国家 = null;
+            foreach (var 国家项 in 全局变量.所有国家列表)
+            {
+                if (国家项.国家ID == 服务端数据.countryId)
+                {
+                    国家 = 国家项;
+                    break;
+                }
+            }
+
+            // 如果通过ID找不到，再通过名字查找
+            if (国家 == null)
+            {
+                国家 = 全局方法类.获取指定名字的国家(服务端数据.country.name);
+            }
+
+            // 如果还是找不到，创建一个新的（但需要从服务器获取完整信息）
             if (国家 == null)
             {
                 国家 = new 国家信息库();
                 国家.国家ID = 服务端数据.countryId;
                 国家.国名 = 服务端数据.country.name;
                 国家.国号 = 服务端数据.country.code;
+                // 注意：这里创建的国家对象缺少黄金、铜钱等信息
+                // 这些信息会在国家信息显示刷新时从服务器获取
                 全局变量.所有国家列表.Add(国家);
+            }
+            else
+            {
+                // 如果找到了，确保国家信息是最新的（更新基本字段）
+                国家.国家ID = 服务端数据.countryId;
+                国家.国名 = 服务端数据.country.name;
+                国家.国号 = 服务端数据.country.code;
             }
 
             // 把玩家加入到该国家的成员表中（如果还没有）
@@ -281,7 +307,69 @@ public class 玩家数据管理 : MonoBehaviour
             全局变量.所有玩家数据表.Add(当前玩家数据);
         }
 
-        Debug.Log($"玩家数据转换完成：{当前玩家数据.姓名}，等级{当前玩家数据.等级}，铜钱{当前玩家数据.铜钱}");
+        Debug.Log($"玩家数据转换完成：{当前玩家数据.姓名}，等级{当前玩家数据.等级}，铜钱{当前玩家数据.铜钱}，国家：{(当前玩家数据.国家 != null ? 当前玩家数据.国家.国名 : "无")}");
+
+        // 如果国家信息显示组件存在，自动刷新国家信息
+        // 使用协程延迟一帧刷新，确保数据已经完全更新
+        if (国家信息显示 != null)
+        {
+            StartCoroutine(延迟刷新国家信息());
+        }
+        else
+        {
+            Debug.LogWarning("国家信息显示组件未设置，无法自动刷新");
+        }
+    }
+
+    /// <summary>
+    /// 延迟一帧刷新国家信息，确保数据已经完全更新
+    /// </summary>
+    IEnumerator 延迟刷新国家信息()
+    {
+        // 等待一帧，确保数据已经完全更新
+        yield return null;
+        
+        // 确保UI GameObject是激活的
+        if (国家信息显示 != null && 国家信息显示.gameObject != null)
+        {
+            if (!国家信息显示.gameObject.activeInHierarchy)
+            {
+                Debug.LogWarning("国家信息显示UI未激活，无法刷新");
+            }
+            else
+            {
+                Debug.Log("开始刷新国家信息显示");
+                国家信息显示.刷新显示();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 延迟指定秒数后刷新国家信息（用于更换国家后的延迟刷新）
+    /// </summary>
+    public void 延迟刷新国家信息(国家信息显示 国家信息显示组件, float 延迟秒数)
+    {
+        StartCoroutine(延迟刷新国家信息协程(国家信息显示组件, 延迟秒数));
+    }
+
+    IEnumerator 延迟刷新国家信息协程(国家信息显示 国家信息显示组件, float 延迟秒数)
+    {
+        Debug.Log($"准备等待{延迟秒数}秒后刷新国家信息显示");
+        
+        yield return new WaitForSeconds(延迟秒数);
+        
+        Debug.Log($"{延迟秒数}秒等待完成，准备刷新国家信息显示");
+        
+        if (国家信息显示组件 != null && 国家信息显示组件.gameObject != null)
+        {
+            Debug.Log($"国家信息显示组件存在，GameObject状态: {国家信息显示组件.gameObject.activeInHierarchy}");
+            Debug.Log("开始刷新国家信息显示");
+            国家信息显示组件.刷新显示();
+        }
+        else
+        {
+            Debug.LogError("国家信息显示组件为null或GameObject为null，无法刷新！");
+        }
     }
 }
 
