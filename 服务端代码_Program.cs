@@ -592,6 +592,113 @@ app.MapPost("/api/getCountryInfo", async ([FromBody] GetCountryInfoRequest 请�
     }
 });
 
+// =================== 更换国家接口：POST /api/changeCountry ===================
+
+app.MapPost("/api/changeCountry", async ([FromBody] ChangeCountryRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0 || 请求.CountryId <= 0)
+        {
+            return Results.Ok(new ChangeCountryResponse(false, "账号ID或国家ID无效"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 检查国家是否存在
+        using (var checkCountryCmd = new MySqlCommand(
+            "SELECT COUNT(*) FROM countries WHERE id = @country_id",
+            connection))
+        {
+            checkCountryCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
+            var countryCountObj = await checkCountryCmd.ExecuteScalarAsync();
+            long countryCount = countryCountObj != null ? (long)countryCountObj : 0;
+
+            if (countryCount == 0)
+            {
+                return Results.Ok(new ChangeCountryResponse(false, "指定的国家不存在"));
+            }
+        }
+
+        // 查找该账号对应的玩家，获取当前国家ID
+        int 玩家ID = -1;
+        int 当前国家ID = -1;
+
+        using (var findPlayerCmd = new MySqlCommand(
+            "SELECT id, country_id FROM players WHERE account_id = @account_id LIMIT 1",
+            connection))
+        {
+            findPlayerCmd.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+            using var reader = await findPlayerCmd.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                玩家ID = reader.GetInt32(0);
+                当前国家ID = reader.IsDBNull(1) ? -1 : reader.GetInt32(1);
+            }
+            else
+            {
+                return Results.Ok(new ChangeCountryResponse(false, "该账号尚未创建角色"));
+            }
+        }
+
+        // 如果要更换的国家和当前国家相同，直接返回成功
+        if (当前国家ID == 请求.CountryId)
+        {
+            return Results.Ok(new ChangeCountryResponse(true, "你已在该国家中，无需更换"));
+        }
+
+        // 开始事务，确保操作的原子性
+        using var transaction = await connection.BeginTransactionAsync();
+
+        try
+        {
+            // 如果玩家当前有国家，先从旧国家中移除（将 country_id 设为 NULL）
+            // 注意：实际上由于一个玩家只能有一个 country_id，更新为新国家ID就会自动"离开"旧国家
+            // 但为了满足用户需求，我们明确地先查询当前国家，然后更新
+            if (当前国家ID > 0)
+            {
+                // 这里实际上不需要单独操作，因为更新 country_id 就会自动"离开"旧国家
+                // 但为了逻辑清晰，我们可以记录日志或进行其他操作
+            }
+
+            // 更新玩家的国家ID为新国家
+            using (var updateCmd = new MySqlCommand(
+                "UPDATE players SET country_id = @country_id WHERE id = @player_id",
+                connection,
+                transaction))
+            {
+                updateCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
+                updateCmd.Parameters.AddWithValue("@player_id", 玩家ID);
+
+                int rows = await updateCmd.ExecuteNonQueryAsync();
+                if (rows > 0)
+                {
+                    // 提交事务
+                    await transaction.CommitAsync();
+                    return Results.Ok(new ChangeCountryResponse(true, "更换国家成功"));
+                }
+                else
+                {
+                    await transaction.RollbackAsync();
+                    return Results.Ok(new ChangeCountryResponse(false, "更换国家失败，未能更新玩家数据"));
+                }
+            }
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new ChangeCountryResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -637,6 +744,10 @@ public record JoinCountryResponse(bool Success, string Message);
 public record GetCountryInfoRequest(int CountryId);
 
 public record GetCountryInfoResponse(bool Success, string Message, int MemberCount, int Rank);
+
+public record ChangeCountryRequest(int AccountId, int CountryId);
+
+public record ChangeCountryResponse(bool Success, string Message);
 
 // 玩家数据（用于API返回）
 public class PlayerData

@@ -56,6 +56,7 @@ public class 创建角色界面 : MonoBehaviour
         if (玩家管理 != null)
         {
             玩家管理.创建角色(当前账号ID, 姓名, 当前选择的性别);
+            国家列表界面.列表显示类型 = 显示类型.加入国家;
             国家列表界面.gameObject.SetActive(true);
         }
         else

@@ -27,6 +27,8 @@ public class 国家信息显示 : MonoBehaviour
     public Button 宣战按钮;
     public Button 进入战场按钮;
 
+    public 国家列表界面 国家列表界面;
+
     [Header("接口地址")]
     private string 获取国家信息地址 = "http://43.139.181.191:5000/api/getCountryInfo";
 
@@ -142,6 +144,8 @@ public class 国家信息显示 : MonoBehaviour
             Debug.Log("请先退出或解散家族!");
             return;
         }
+        国家列表界面.列表显示类型 = 显示类型.更换国家;
+        国家列表界面.gameObject.SetActive(true);
     }
 }
 

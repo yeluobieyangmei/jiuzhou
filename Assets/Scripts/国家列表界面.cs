@@ -12,31 +12,50 @@ using 国家系统;
 /// - 用 Toggle 列出所有国家，记录当前选中
 /// - 点击“加入国家”按钮时，请求服务端把玩家加入选中的国家
 /// </summary>
+/// 
+public enum 显示类型
+{
+    加入国家,
+    更换国家,
+    国家排名
+}
 public class 国家列表界面 : MonoBehaviour
 {
     [Header("UI 引用")]
     public Transform 父对象;          // ScrollView 的 Content
     public GameObject 要克隆的对象;    // 每一行国家的模板（带 Toggle + 文本）
 
-    [Header("脚本引用")]
-    public 玩家数据管理 玩家管理;      // 在 Inspector 中拖拽
-
     [Header("接口地址")]
-    public string 国家列表地址 = "http://43.139.181.191:5000/api/countries";
-    public string 加入国家地址 = "http://43.139.181.191:5000/api/joinCountry";
+    private string 国家列表地址 = "http://43.139.181.191:5000/api/countries";
+    private string 加入国家地址 = "http://43.139.181.191:5000/api/joinCountry";
+    private string 更换国家地址 = "http://43.139.181.191:5000/api/changeCountry";
 
     List<GameObject> 克隆池 = new List<GameObject>();
     public 国家信息库 当前选中国家 = null;
 
+    public Button 加入国家按钮;
+    public Button 更换国家按钮;
+    public 显示类型 列表显示类型 = 显示类型.加入国家;
+
+    public 国家信息显示 国家信息显示;
+
     void OnEnable()
     {
-        // 第一次打开如果本地还没有国家列表，就从服务器拉取
-        if (全局变量.所有国家列表.Count == 0)
+        // 如果是更换国家或国家排名模式，需要显示完整的国家列表，应该从服务器获取
+        // 如果是加入国家模式，且本地已有国家列表（创建角色后选择国家），可以使用本地缓存
+        if (列表显示类型 == 显示类型.更换国家 || 列表显示类型 == 显示类型.国家排名)
         {
+            // 更换国家和国家排名需要完整的国家列表，强制从服务器获取
+            StartCoroutine(获取国家列表然后刷新());
+        }
+        else if (全局变量.所有国家列表.Count == 0)
+        {
+            // 加入国家模式，但本地还没有国家列表，从服务器拉取
             StartCoroutine(获取国家列表然后刷新());
         }
         else
         {
+            // 加入国家模式，且本地已有国家列表，直接刷新显示
             刷新显示();
         }
     }
@@ -127,6 +146,21 @@ public class 国家列表界面 : MonoBehaviour
                 }
             });
         }
+        switch (列表显示类型)
+        {
+            case 显示类型.加入国家:
+                加入国家按钮.gameObject.SetActive(true);
+                更换国家按钮.gameObject.SetActive(false);
+                break;
+            case 显示类型.更换国家:
+                加入国家按钮.gameObject.SetActive(false);
+                更换国家按钮.gameObject.SetActive(true);
+                break;
+            case 显示类型.国家排名:
+                加入国家按钮.gameObject.SetActive(false);
+                更换国家按钮.gameObject.SetActive(false);
+                break;
+        }
     }
 
     public void 加入国家()
@@ -176,9 +210,9 @@ public class 国家列表界面 : MonoBehaviour
                     Debug.Log($"成功加入 {国名}");
 
                     // 成功加入后，刷新玩家数据，让国家显示更新
-                    if (玩家管理 != null)
+                    if (玩家数据管理.实例 != null)
                     {
-                        玩家管理.获取玩家数据(accountId);
+                        玩家数据管理.实例.获取玩家数据(accountId);
                     }
 
                     // 成功加入后，关闭当前国家列表界面的 UI
@@ -187,6 +221,70 @@ public class 国家列表界面 : MonoBehaviour
                 else
                 {
                     Debug.Log(响应 != null ? ("加入国家失败：" + 响应.message) : "加入国家失败：解析错误");
+                }
+            }
+        }
+    }
+
+    public void 更换国家()
+    {
+        if (当前选中国家 == null)
+        {
+            Debug.Log("请先选择一个国家");
+            return;
+        }
+
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            Debug.LogError("更换国家失败：未找到 AccountId，可能尚未登录");
+            return;
+        }
+
+        StartCoroutine(发送更换国家请求(accountId, 当前选中国家.国家ID, 当前选中国家.国名));
+    }
+
+    IEnumerator 发送更换国家请求(int accountId, int 国家ID, string 国名)
+    {
+        string json数据 = $"{{\"accountId\":{accountId},\"countryId\":{国家ID}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(更换国家地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("更换国家出错: " + 请求.error);
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("更换国家响应: " + 返回文本);
+
+                更换国家响应 响应 = JsonUtility.FromJson<更换国家响应>(返回文本);
+                if (响应 != null && 响应.success)
+                {
+                    Debug.Log($"成功更换到 {国名}");
+
+                    // 成功更换后，刷新玩家数据，让国家显示更新
+                    if (玩家数据管理.实例 != null)
+                    {
+                        玩家数据管理.实例.获取玩家数据(accountId);
+                    }
+
+                    // 成功更换后，关闭当前国家列表界面的 UI
+                    gameObject.SetActive(false);
+                    国家信息显示.刷新显示();
+                }
+                else
+                {
+                    Debug.Log(响应 != null ? ("更换国家失败：" + 响应.message) : "更换国家失败：解析错误");
                 }
             }
         }
@@ -218,6 +316,13 @@ public class 国家简要
 
 [System.Serializable]
 public class 加入国家响应
+{
+    public bool success;
+    public string message;
+}
+
+[System.Serializable]
+public class 更换国家响应
 {
     public bool success;
     public string message;
