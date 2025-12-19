@@ -822,6 +822,160 @@ app.MapGet("/api/getAllPlayers", async () =>
     }
 });
 
+// =================== 创建家族接口：POST /api/createClan ===================
+
+app.MapPost("/api/createClan", async ([FromBody] CreateClanRequest 请求) =>
+{
+    try
+    {
+        // 验证输入
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new CreateClanResponse(false, "账号ID无效", -1));
+        }
+
+        if (string.IsNullOrWhiteSpace(请求.ClanName))
+        {
+            return Results.Ok(new CreateClanResponse(false, "家族名字不能为空", -1));
+        }
+
+        // 验证家族名字长度
+        if (请求.ClanName.Length > 50)
+        {
+            return Results.Ok(new CreateClanResponse(false, "家族名字长度不能超过50个字符", -1));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息，确认玩家存在且有国家归属
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, country_id FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new CreateClanResponse(false, "玩家不存在或尚未创建角色", -1));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        int? 国家ID = playerReader.IsDBNull(1) ? null : playerReader.GetInt32(1);
+        playerReader.Close();
+
+        // 检查玩家是否有国家归属
+        if (!国家ID.HasValue || 国家ID.Value <= 0)
+        {
+            return Results.Ok(new CreateClanResponse(false, "创建家族失败：玩家必须属于某个国家", -1));
+        }
+
+        // 检查玩家是否已有家族
+        using var checkClanCommand = new MySqlCommand(
+            "SELECT clan_id FROM players WHERE id = @player_id",
+            connection
+        );
+        checkClanCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+
+        var clanIdResult = await checkClanCommand.ExecuteScalarAsync();
+        if (clanIdResult != null && !DBNull.Value.Equals(clanIdResult))
+        {
+            return Results.Ok(new CreateClanResponse(false, "创建家族失败：玩家已属于某个家族", -1));
+        }
+
+        // 3. 检查家族名字是否重复
+        using var checkNameCommand = new MySqlCommand(
+            "SELECT COUNT(*) FROM clans WHERE name = @clan_name",
+            connection
+        );
+        checkNameCommand.Parameters.AddWithValue("@clan_name", 请求.ClanName);
+
+        var nameCountResult = await checkNameCommand.ExecuteScalarAsync();
+        long nameCount = nameCountResult != null ? (long)nameCountResult : 0;
+        if (nameCount > 0)
+        {
+            return Results.Ok(new CreateClanResponse(false, "家族名字已被使用，请使用其他名字", -1));
+        }
+
+        // 4. 检查玩家黄金是否足够（创建家族需要5000黄金）
+        using var checkGoldCommand = new MySqlCommand(
+            "SELECT gold FROM players WHERE id = @player_id",
+            connection
+        );
+        checkGoldCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        
+        var goldResult = await checkGoldCommand.ExecuteScalarAsync();
+        int 当前黄金 = goldResult != null ? Convert.ToInt32(goldResult) : 0;
+        const int 创建家族消耗黄金 = 5000;
+        
+        if (当前黄金 < 创建家族消耗黄金)
+        {
+            return Results.Ok(new CreateClanResponse(false, $"创建家族失败：需要{创建家族消耗黄金}黄金，当前只有{当前黄金}黄金", -1));
+        }
+
+        // 5. 开始事务，创建家族并更新玩家信息
+        using var transaction = await connection.BeginTransactionAsync();
+
+        try
+        {
+            // 插入家族数据
+            using var insertClanCommand = new MySqlCommand(
+                @"INSERT INTO clans (name, level, leader_id, deputy_leader_id, prosperity, funds, 
+                                    war_score, is_war_declared, is_war_fighting, country_id)
+                  VALUES (@name, 1, @leader_id, NULL, 0, 0, 0, FALSE, FALSE, @country_id)",
+                connection,
+                transaction
+            );
+            insertClanCommand.Parameters.AddWithValue("@name", 请求.ClanName);
+            insertClanCommand.Parameters.AddWithValue("@leader_id", 玩家ID);
+            insertClanCommand.Parameters.AddWithValue("@country_id", 国家ID.Value);
+
+            await insertClanCommand.ExecuteNonQueryAsync();
+
+            // 获取刚插入的家族ID
+            long 家族ID = insertClanCommand.LastInsertedId;
+
+            // 更新玩家的家族ID并扣除黄金
+            using var updatePlayerCommand = new MySqlCommand(
+                "UPDATE players SET clan_id = @clan_id, gold = gold - @cost_gold WHERE id = @player_id",
+                connection,
+                transaction
+            );
+            updatePlayerCommand.Parameters.AddWithValue("@clan_id", 家族ID);
+            updatePlayerCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            updatePlayerCommand.Parameters.AddWithValue("@cost_gold", 创建家族消耗黄金);
+
+            await updatePlayerCommand.ExecuteNonQueryAsync();
+
+            // 在家族成员职位表中添加族长职位记录
+            using var insertRoleCommand = new MySqlCommand(
+                "INSERT INTO clan_member_roles (clan_id, player_id, role) VALUES (@clan_id, @player_id, 'leader')",
+                connection,
+                transaction
+            );
+            insertRoleCommand.Parameters.AddWithValue("@clan_id", 家族ID);
+            insertRoleCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            await insertRoleCommand.ExecuteNonQueryAsync();
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new CreateClanResponse(true, "家族创建成功", (int)家族ID));
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new CreateClanResponse(false, "服务器错误: " + ex.Message, -1));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -877,6 +1031,10 @@ public record GetCountryMembersRequest(int CountryId);
 public record GetCountryMembersResponse(bool Success, string Message, List<PlayerSummary> Data);
 
 public record GetAllPlayersResponse(bool Success, string Message, List<PlayerSummary> Data);
+
+public record CreateClanRequest(int AccountId, string ClanName);
+
+public record CreateClanResponse(bool Success, string Message, int ClanId);
 
 // 玩家数据（用于API返回）
 public class PlayerData

@@ -41,27 +41,27 @@ CREATE TABLE IF NOT EXISTS countries (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='国家信息表';
 
 -- 2. 家族表（clans）
+-- 注意：排名（country_rank, world_rank）不存储在数据库中，应该由服务器实时计算
 CREATE TABLE IF NOT EXISTS clans (
     id INT AUTO_INCREMENT PRIMARY KEY COMMENT '家族ID（主键）',
     name VARCHAR(50) NOT NULL UNIQUE COMMENT '家族名字',
-    level INT NOT NULL DEFAULT 1 COMMENT '家族等级',
+    level INT NOT NULL DEFAULT 1 COMMENT '家族等级（1-5级，每级增加10人上限）',
     leader_id INT NULL COMMENT '族长ID（稍后添加外键）',
     deputy_leader_id INT NULL COMMENT '副族长ID（稍后添加外键）',
     prosperity INT NOT NULL DEFAULT 0 COMMENT '家族繁荣值',
-    funds INT NOT NULL DEFAULT 0 COMMENT '家族资金',
-    country_rank INT NOT NULL DEFAULT 0 COMMENT '国家排名',
-    world_rank INT NOT NULL DEFAULT 0 COMMENT '世界排名',
+    funds INT NOT NULL DEFAULT 0 COMMENT '家族资金（升级消耗50000）',
     war_score INT NOT NULL DEFAULT 0 COMMENT '家族王城战积分',
     is_war_declared BOOLEAN NOT NULL DEFAULT FALSE COMMENT '王城战是否宣战',
     is_war_fighting BOOLEAN NOT NULL DEFAULT FALSE COMMENT '王城战是否战斗中',
-    country_id INT NULL COMMENT '所属国家ID（稍后添加外键）',
+    country_id INT NULL COMMENT '所属国家ID（稍后添加外键，家族创建时自动设置为族长的国家）',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     
     INDEX idx_name (name),
     INDEX idx_leader_id (leader_id),
     INDEX idx_country_id (country_id),
-    INDEX idx_world_rank (world_rank)
+    INDEX idx_level (level),
+    INDEX idx_funds (funds)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='家族信息表';
 
 -- 3. 玩家表（players）
@@ -101,6 +101,24 @@ CREATE TABLE IF NOT EXISTS player_attributes (
     INDEX idx_player_id (player_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='玩家属性表';
 
+-- 5. 家族成员职位表（clan_member_roles）
+-- 用途：存储家族成员的职位信息（支持多个副族长和多个精英）
+CREATE TABLE IF NOT EXISTS clan_member_roles (
+    id INT AUTO_INCREMENT PRIMARY KEY COMMENT '职位记录ID（主键）',
+    clan_id INT NOT NULL COMMENT '家族ID（稍后添加外键 -> clans.id）',
+    player_id INT NOT NULL COMMENT '玩家ID（稍后添加外键 -> players.id）',
+    role VARCHAR(20) NOT NULL COMMENT '职位（leader/副族长/精英/成员）',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '任命时间',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    
+    -- 唯一约束：一个玩家在一个家族中只能有一个职位
+    UNIQUE KEY uk_clan_player (clan_id, player_id),
+    
+    INDEX idx_clan_id (clan_id),
+    INDEX idx_player_id (player_id),
+    INDEX idx_role (role)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='家族成员职位表';
+
 -- ============================================
 -- 第二步：添加外键约束（按依赖顺序）
 -- ============================================
@@ -114,6 +132,11 @@ ADD CONSTRAINT fk_players_clan_id FOREIGN KEY (clan_id) REFERENCES clans(id) ON 
 -- 玩家属性表外键
 ALTER TABLE player_attributes
 ADD CONSTRAINT fk_player_attributes_player_id FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE;
+
+-- 家族成员职位表外键
+ALTER TABLE clan_member_roles
+ADD CONSTRAINT fk_clan_member_roles_clan_id FOREIGN KEY (clan_id) REFERENCES clans(id) ON DELETE CASCADE,
+ADD CONSTRAINT fk_clan_member_roles_player_id FOREIGN KEY (player_id) REFERENCES players(id) ON DELETE CASCADE;
 
 -- 家族表外键
 ALTER TABLE clans
@@ -141,8 +164,16 @@ ADD CONSTRAINT fk_countries_war_clan2_id FOREIGN KEY (war_clan2_id) REFERENCES c
 -- 1. 玩家表（players）通过 account_id 关联账号表（accounts）
 -- 2. 玩家表通过 country_id 和 clan_id 关联国家和家族
 -- 3. 国家表存储各官职的玩家ID（外键）
--- 4. 家族表存储族长/副族长ID（外键）
+-- 4. 家族表存储族长ID（外键），副族长和精英职位存储在 clan_member_roles 表中
 -- 5. 玩家属性表与玩家表是一对一关系（通过 player_id）
--- 6. 所有外键都设置了 ON DELETE CASCADE 或 ON DELETE SET NULL，保证数据一致性
+-- 6. 家族成员职位表（clan_member_roles）存储家族成员的职位信息
+--    职位类型：leader（族长）、副族长、精英、成员
+--    职位数量限制（根据家族等级）：
+--      1级：1个副族长，2个精英
+--      2级：1个副族长，3个精英
+--      3级：2个副族长，4个精英
+--      4级：2个副族长，5个精英
+--      5级：3个副族长，6个精英
+-- 7. 所有外键都设置了 ON DELETE CASCADE 或 ON DELETE SET NULL，保证数据一致性
 -- ============================================
 
