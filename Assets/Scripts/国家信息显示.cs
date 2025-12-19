@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.Networking;
-using System.Collections;
 using System.Text;
 using 玩家数据结构;
 using 国家系统;
@@ -209,6 +208,12 @@ public class 国家信息显示 : MonoBehaviour
             return;
         }
         国家列表界面.列表显示类型 = 显示类型.更换国家;
+        国家列表界面.gameObject.SetActive(true);
+    }
+
+    public void 点击排名按钮()
+    {
+        国家列表界面.列表显示类型 = 显示类型.国家排名;
         国家列表界面.gameObject.SetActive(true);
     }
 }

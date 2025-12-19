@@ -116,8 +116,7 @@ public class 国家列表界面 : MonoBehaviour
         }
 
         要克隆的对象.gameObject.SetActive(false);
-        int count = 全局变量.所有国家列表.Count;
-
+        
         // 清理旧的克隆对象
         foreach (var obj in 克隆池)
         {
@@ -126,17 +125,45 @@ public class 国家列表界面 : MonoBehaviour
         克隆池.Clear();
         当前选中国家 = null;
 
+        // 根据显示类型决定是否排序
+        List<国家信息库> 要显示的国家列表 = new List<国家信息库>(全局变量.所有国家列表);
+        
+        // 如果是国家排名模式，按照国家资金（黄金）降序排序
+        if (列表显示类型 == 显示类型.国家排名)
+        {
+            要显示的国家列表.Sort((a, b) => b.黄金.CompareTo(a.黄金));
+            Debug.Log("国家排名模式：已按照国家资金（黄金）降序排序");
+        }
+
+        int count = 要显示的国家列表.Count;
+
         for (int i = 0; i < count; i++)
         {
             GameObject 克隆对象 = Instantiate(要克隆的对象, 父对象);
-            克隆对象.transform.GetChild(0).GetComponent<Text>().text = 全局变量.所有国家列表[i].国号;
-            克隆对象.transform.GetChild(1).GetComponent<Text>().text = 全局变量.所有国家列表[i].国名;
+            
+            // 如果是国家排名模式，显示排名序号
+            if (列表显示类型 == 显示类型.国家排名)
+            {
+                克隆对象.transform.GetChild(0).GetComponent<Text>().text = $"{i + 1}.";
+                克隆对象.transform.GetChild(0).GetComponent<Text>().fontSize = 30;
+                克隆对象.transform.GetChild(0).GetComponent<Text>().color = new Color(0.94f, 0.97f, 0.21f);
+                克隆对象.transform.GetChild(1).GetComponent<Text>().text = $"{要显示的国家列表[i].国号} {要显示的国家列表[i].国名}";
+            }
+            else
+            {
+                // 其他模式保持原样
+                克隆对象.transform.GetChild(0).GetComponent<Text>().fontSize = 22;
+                克隆对象.transform.GetChild(0).GetComponent<Text>().color = new Color(1f, 1f, 1f);
+                克隆对象.transform.GetChild(0).GetComponent<Text>().text = 要显示的国家列表[i].国号;
+                克隆对象.transform.GetChild(1).GetComponent<Text>().text = 要显示的国家列表[i].国名;
+            }
+            
             克隆对象.gameObject.SetActive(true);
             克隆池.Add(克隆对象);
 
             // 处理 Toggle 选择逻辑
             Toggle t = 克隆对象.GetComponent<Toggle>();
-            国家信息库 捕获国家 = 全局变量.所有国家列表[i]; // 闭包捕获
+            国家信息库 捕获国家 = 要显示的国家列表[i]; // 闭包捕获
             t.onValueChanged.AddListener(isOn =>
             {
                 if (isOn)
@@ -146,6 +173,7 @@ public class 国家列表界面 : MonoBehaviour
                 }
             });
         }
+        
         switch (列表显示类型)
         {
             case 显示类型.加入国家:
