@@ -27,6 +27,7 @@ public class 国家信息显示 : MonoBehaviour
     public Button 进入战场按钮;
 
     public 国家列表界面 国家列表界面;
+    public 玩家列表显示 玩家列表显示;
 
     [Header("接口地址")]
     private string 获取国家信息地址 = "http://43.139.181.191:5000/api/getCountryInfo";
@@ -215,6 +216,21 @@ public class 国家信息显示 : MonoBehaviour
     {
         国家列表界面.列表显示类型 = 显示类型.国家排名;
         国家列表界面.gameObject.SetActive(true);
+    }
+
+    public void 点击显示国家成员列表()
+    {
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null || 当前玩家.国家 == null)
+        {
+            Debug.LogWarning("当前玩家没有国家，无法显示国家成员列表");
+            return;
+        }
+
+        玩家列表显示.UI标题.text = "国家成员";
+        玩家列表显示.当前显示类型 = 玩家列表显示.显示类型.国家不任命官员;
+        玩家列表显示.当前国家 = 当前玩家.国家; // 设置当前国家
+        玩家列表显示.gameObject.SetActive(true);
     }
 }
 

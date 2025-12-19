@@ -699,6 +699,129 @@ app.MapPost("/api/changeCountry", async ([FromBody] ChangeCountryRequest 请求)
     }
 });
 
+// =================== 获取国家成员列表接口：POST /api/getCountryMembers ===================
+
+app.MapPost("/api/getCountryMembers", async ([FromBody] GetCountryMembersRequest 请求) =>
+{
+    try
+    {
+        if (请求.CountryId <= 0)
+        {
+            return Results.Ok(new GetCountryMembersResponse(false, "国家ID无效", new List<PlayerSummary>()));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询指定国家的所有成员，按属性之和降序排序（生命值+攻击力+防御力）
+        string sql = @"
+            SELECT 
+                p.id, p.name, p.gender, p.level, p.title_name, p.office,
+                p.copper_money, p.gold,
+                pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate
+            FROM players p
+            LEFT JOIN player_attributes pa ON p.id = pa.player_id
+            WHERE p.country_id = @country_id
+            ORDER BY (COALESCE(pa.max_hp, 0) + COALESCE(pa.attack, 0) + COALESCE(pa.defense, 0)) DESC";
+
+        using var command = new MySqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@country_id", 请求.CountryId);
+
+        using var reader = await command.ExecuteReaderAsync();
+
+        var 成员列表 = new List<PlayerSummary>();
+        while (await reader.ReadAsync())
+        {
+            var 成员 = new PlayerSummary
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.GetString(1),
+                Gender = reader.GetString(2),
+                Level = reader.GetInt32(3),
+                TitleName = reader.GetString(4),
+                Office = reader.GetString(5),
+                CopperMoney = reader.GetInt32(6),
+                Gold = reader.GetInt32(7),
+                Attributes = new PlayerAttributesData
+                {
+                    MaxHp = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
+                    CurrentHp = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                    Attack = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                    Defense = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                    CritRate = reader.IsDBNull(12) ? 0f : reader.GetFloat(12)
+                }
+            };
+            成员列表.Add(成员);
+        }
+
+        return Results.Ok(new GetCountryMembersResponse(true, "获取成功", 成员列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetCountryMembersResponse(false, "服务器错误: " + ex.Message, new List<PlayerSummary>()));
+    }
+});
+
+// =================== 获取所有玩家列表接口：GET /api/getAllPlayers ===================
+
+app.MapGet("/api/getAllPlayers", async () =>
+{
+    try
+    {
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询所有玩家，按属性之和降序排序（生命值+攻击力+防御力）
+        string sql = @"
+            SELECT 
+                p.id, p.name, p.gender, p.level, p.title_name, p.office,
+                p.copper_money, p.gold, p.country_id,
+                pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate,
+                c.name as country_name, c.code as country_code
+            FROM players p
+            LEFT JOIN player_attributes pa ON p.id = pa.player_id
+            LEFT JOIN countries c ON p.country_id = c.id
+            ORDER BY (COALESCE(pa.max_hp, 0) + COALESCE(pa.attack, 0) + COALESCE(pa.defense, 0)) DESC";
+
+        using var command = new MySqlCommand(sql, connection);
+        using var reader = await command.ExecuteReaderAsync();
+
+        var 玩家列表 = new List<PlayerSummary>();
+        while (await reader.ReadAsync())
+        {
+            var 玩家 = new PlayerSummary
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.GetString(1),
+                Gender = reader.GetString(2),
+                Level = reader.GetInt32(3),
+                TitleName = reader.GetString(4),
+                Office = reader.GetString(5),
+                CopperMoney = reader.GetInt32(6),
+                Gold = reader.GetInt32(7),
+                CountryId = reader.IsDBNull(8) ? -1 : reader.GetInt32(8),
+                Attributes = new PlayerAttributesData
+                {
+                    MaxHp = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                    CurrentHp = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                    Attack = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                    Defense = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+                    CritRate = reader.IsDBNull(13) ? 0f : reader.GetFloat(13)
+                },
+                CountryName = reader.IsDBNull(14) ? "" : reader.GetString(14),
+                CountryCode = reader.IsDBNull(15) ? "" : reader.GetString(15)
+            };
+            玩家列表.Add(玩家);
+        }
+
+        return Results.Ok(new GetAllPlayersResponse(true, "获取成功", 玩家列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetAllPlayersResponse(false, "服务器错误: " + ex.Message, new List<PlayerSummary>()));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -748,6 +871,12 @@ public record GetCountryInfoResponse(bool Success, string Message, int MemberCou
 public record ChangeCountryRequest(int AccountId, int CountryId);
 
 public record ChangeCountryResponse(bool Success, string Message);
+
+public record GetCountryMembersRequest(int CountryId);
+
+public record GetCountryMembersResponse(bool Success, string Message, List<PlayerSummary> Data);
+
+public record GetAllPlayersResponse(bool Success, string Message, List<PlayerSummary> Data);
 
 // 玩家数据（用于API返回）
 public class PlayerData
@@ -799,5 +928,21 @@ public class CountrySummary
     public int CopperMoney { get; set; }
     public int Food { get; set; }
     public int Gold { get; set; }
+}
+
+public class PlayerSummary
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public string Gender { get; set; } = "";
+    public int Level { get; set; }
+    public string TitleName { get; set; } = "";
+    public string Office { get; set; } = "";
+    public int CopperMoney { get; set; }
+    public int Gold { get; set; }
+    public int CountryId { get; set; } = -1;  // -1 表示没有国家
+    public PlayerAttributesData Attributes { get; set; } = new();
+    public string CountryName { get; set; } = "";
+    public string CountryCode { get; set; } = "";
 }
 
