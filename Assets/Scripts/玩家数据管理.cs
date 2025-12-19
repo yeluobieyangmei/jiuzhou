@@ -20,6 +20,10 @@ public class 玩家数据管理 : MonoBehaviour
     // 当前玩家数据（从服务器加载后存储在这里）
     public 玩家数据 当前玩家数据 { get; private set; }
 
+    // 加载动画相关
+    private GameObject 加载动画对象;
+    private 加载动画 加载动画组件;
+
     private void Awake()
     {
         // 简单单例：跨场景持久存在，避免重复创建
@@ -31,6 +35,35 @@ public class 玩家数据管理 : MonoBehaviour
 
         实例 = this;
         DontDestroyOnLoad(gameObject);
+
+        // 初始化加载动画（从Resources加载预制体）
+        初始化加载动画();
+    }
+
+    /// <summary>
+    /// 初始化加载动画（从Resources加载预制体）
+    /// </summary>
+    private void 初始化加载动画()
+    {
+        // 从Resources文件夹加载预制体（路径：Resources/通用界面/加载动画）
+        GameObject 加载动画预制体 = Resources.Load<GameObject>("通用界面/加载动画");
+        if (加载动画预制体 != null)
+        {
+            加载动画对象 = Instantiate(加载动画预制体);
+            加载动画组件 = 加载动画对象.GetComponent<加载动画>();
+            if (加载动画组件 == null)
+            {
+                Debug.LogError("加载动画预制体上未找到 加载动画 组件！");
+            }
+            // 初始状态隐藏
+            加载动画对象.SetActive(false);
+            // 设置为DontDestroyOnLoad，确保跨场景存在
+            DontDestroyOnLoad(加载动画对象);
+        }
+        else
+        {
+            Debug.LogError("无法从Resources/通用界面/加载动画加载预制体！请检查路径是否正确。");
+        }
     }
 
     /// <summary>
@@ -346,6 +379,7 @@ public class 玩家数据管理 : MonoBehaviour
 
     /// <summary>
     /// 延迟指定秒数后刷新国家信息（用于更换国家后的延迟刷新）
+    /// 会显示加载动画，并在延迟期间更新进度
     /// </summary>
     public void 延迟刷新国家信息(国家信息显示 国家信息显示组件, float 延迟秒数)
     {
@@ -356,10 +390,35 @@ public class 玩家数据管理 : MonoBehaviour
     {
         Debug.Log($"准备等待{延迟秒数}秒后刷新国家信息显示");
         
-        yield return new WaitForSeconds(延迟秒数);
+        // 显示加载动画
+        显示加载动画("正在更新国家信息...");
+        
+        // 在延迟期间更新进度条
+        float 已等待时间 = 0f;
+        float 更新间隔 = 0.1f; // 每0.1秒更新一次进度
+        
+        while (已等待时间 < 延迟秒数)
+        {
+            yield return new WaitForSeconds(更新间隔);
+            已等待时间 += 更新间隔;
+            
+            // 计算进度（0到1之间）
+            float 进度值 = 已等待时间 / 延迟秒数;
+            更新加载进度(进度值, $"正在更新国家信息... {(进度值 * 100):F0}%");
+        }
+        
+        // 确保进度条到达100%
+        更新加载进度(1.0f, "更新完成！");
+        
+        // 等待一小段时间让用户看到100%
+        yield return new WaitForSeconds(0.2f);
         
         Debug.Log($"{延迟秒数}秒等待完成，准备刷新国家信息显示");
         
+        // 隐藏加载动画
+        隐藏加载动画();
+        
+        // 刷新国家信息显示
         if (国家信息显示组件 != null && 国家信息显示组件.gameObject != null)
         {
             Debug.Log($"国家信息显示组件存在，GameObject状态: {国家信息显示组件.gameObject.activeInHierarchy}");
@@ -369,6 +428,46 @@ public class 玩家数据管理 : MonoBehaviour
         else
         {
             Debug.LogError("国家信息显示组件为null或GameObject为null，无法刷新！");
+        }
+    }
+
+    /// <summary>
+    /// 显示加载动画
+    /// </summary>
+    private void 显示加载动画(string 初始文本 = "加载中...")
+    {
+        if (加载动画对象 != null)
+        {
+            加载动画对象.SetActive(true);
+        }
+
+        if (加载动画组件 != null)
+        {
+            加载动画组件.进度.text = 初始文本;
+            加载动画组件.滑动条.value = 0f;
+        }
+    }
+
+    /// <summary>
+    /// 更新加载进度（需要在Unity主线程中调用）
+    /// </summary>
+    private void 更新加载进度(float 进度值, string 进度文本内容)
+    {
+        if (加载动画组件 != null)
+        {
+            加载动画组件.滑动条.value = 进度值;
+            加载动画组件.进度.text = 进度文本内容;
+        }
+    }
+
+    /// <summary>
+    /// 隐藏加载动画
+    /// </summary>
+    private void 隐藏加载动画()
+    {
+        if (加载动画对象 != null)
+        {
+            加载动画对象.SetActive(false);
         }
     }
 }
