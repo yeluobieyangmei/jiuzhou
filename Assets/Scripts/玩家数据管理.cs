@@ -379,7 +379,7 @@ public class 玩家数据管理 : MonoBehaviour
 
     /// <summary>
     /// 延迟指定秒数后刷新国家信息（用于更换国家后的延迟刷新）
-    /// 会显示加载动画，并在延迟期间更新进度
+    /// 会显示加载动画，并在延迟期间平滑更新进度
     /// </summary>
     public void 延迟刷新国家信息(国家信息显示 国家信息显示组件, float 延迟秒数)
     {
@@ -390,33 +390,16 @@ public class 玩家数据管理 : MonoBehaviour
     {
         Debug.Log($"准备等待{延迟秒数}秒后刷新国家信息显示");
         
-        // 显示加载动画
-        显示加载动画("正在更新国家信息...");
-        
-        // 在延迟期间更新进度条
-        float 已等待时间 = 0f;
-        float 更新间隔 = 0.1f; // 每0.1秒更新一次进度
-        
-        while (已等待时间 < 延迟秒数)
+        // 使用通用加载动画方法，让滑动条平滑移动
+        if (加载动画组件 != null)
         {
-            yield return new WaitForSeconds(更新间隔);
-            已等待时间 += 更新间隔;
-            
-            // 计算进度（0到1之间）
-            float 进度值 = 已等待时间 / 延迟秒数;
-            更新加载进度(进度值, $"正在更新国家信息... {(进度值 * 100):F0}%");
+            加载动画组件.开始加载动画(延迟秒数, "正在更新国家信息...");
         }
         
-        // 确保进度条到达100%
-        更新加载进度(1.0f, "更新完成！");
-        
-        // 等待一小段时间让用户看到100%
-        yield return new WaitForSeconds(0.2f);
+        // 等待指定时间
+        yield return new WaitForSeconds(延迟秒数);
         
         Debug.Log($"{延迟秒数}秒等待完成，准备刷新国家信息显示");
-        
-        // 隐藏加载动画
-        隐藏加载动画();
         
         // 刷新国家信息显示
         if (国家信息显示组件 != null && 国家信息显示组件.gameObject != null)
@@ -428,46 +411,6 @@ public class 玩家数据管理 : MonoBehaviour
         else
         {
             Debug.LogError("国家信息显示组件为null或GameObject为null，无法刷新！");
-        }
-    }
-
-    /// <summary>
-    /// 显示加载动画
-    /// </summary>
-    private void 显示加载动画(string 初始文本 = "加载中...")
-    {
-        if (加载动画对象 != null)
-        {
-            加载动画对象.SetActive(true);
-        }
-
-        if (加载动画组件 != null)
-        {
-            加载动画组件.进度.text = 初始文本;
-            加载动画组件.滑动条.value = 0f;
-        }
-    }
-
-    /// <summary>
-    /// 更新加载进度（需要在Unity主线程中调用）
-    /// </summary>
-    private void 更新加载进度(float 进度值, string 进度文本内容)
-    {
-        if (加载动画组件 != null)
-        {
-            加载动画组件.滑动条.value = 进度值;
-            加载动画组件.进度.text = 进度文本内容;
-        }
-    }
-
-    /// <summary>
-    /// 隐藏加载动画
-    /// </summary>
-    private void 隐藏加载动画()
-    {
-        if (加载动画对象 != null)
-        {
-            加载动画对象.SetActive(false);
         }
     }
 }
