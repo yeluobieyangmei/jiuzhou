@@ -976,6 +976,143 @@ app.MapPost("/api/createClan", async ([FromBody] CreateClanRequest 请求) =>
     }
 });
 
+// =================== 获取家族详细信息接口：POST /api/getClanInfo ===================
+
+app.MapPost("/api/getClanInfo", async ([FromBody] GetClanInfoRequest 请求) =>
+{
+    try
+    {
+        if (请求.ClanId <= 0)
+        {
+            return Results.Ok(new GetClanInfoResponse(false, "家族ID无效", null));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询家族基本信息
+        using var clanCommand = new MySqlCommand(
+            @"SELECT id, name, level, leader_id, prosperity, funds, country_id
+              FROM clans WHERE id = @clan_id",
+            connection
+        );
+        clanCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+
+        using var clanReader = await clanCommand.ExecuteReaderAsync();
+        if (!await clanReader.ReadAsync())
+        {
+            return Results.Ok(new GetClanInfoResponse(false, "家族不存在", null));
+        }
+
+        int 家族ID = clanReader.GetInt32(0);
+        string 家族名字 = clanReader.GetString(1);
+        int 家族等级 = clanReader.GetInt32(2);
+        int 族长ID = clanReader.GetInt32(3);
+        int 家族繁荣值 = clanReader.GetInt32(4);
+        int 家族资金 = clanReader.GetInt32(5);
+        int 国家ID = clanReader.GetInt32(6);
+        clanReader.Close();
+
+        // 2. 查询族长姓名
+        string 族长姓名 = "";
+        using var leaderCommand = new MySqlCommand(
+            "SELECT name FROM players WHERE id = @leader_id",
+            connection
+        );
+        leaderCommand.Parameters.AddWithValue("@leader_id", 族长ID);
+        var leaderNameResult = await leaderCommand.ExecuteScalarAsync();
+        if (leaderNameResult != null)
+        {
+            族长姓名 = leaderNameResult.ToString() ?? "";
+        }
+
+        // 3. 查询家族成员数
+        using var memberCountCommand = new MySqlCommand(
+            "SELECT COUNT(*) FROM players WHERE clan_id = @clan_id",
+            connection
+        );
+        memberCountCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        var memberCountResult = await memberCountCommand.ExecuteScalarAsync();
+        int 成员数 = memberCountResult != null ? Convert.ToInt32(memberCountResult) : 0;
+
+        // 4. 查询当前玩家在家族中的职位
+        string 玩家职位 = "成员";
+        if (请求.PlayerId > 0)
+        {
+            if (请求.PlayerId == 族长ID)
+            {
+                玩家职位 = "族长";
+            }
+            else
+            {
+                using var roleCommand = new MySqlCommand(
+                    "SELECT role FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id",
+                    connection
+                );
+                roleCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+                roleCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+                var roleResult = await roleCommand.ExecuteScalarAsync();
+                if (roleResult != null)
+                {
+                    玩家职位 = roleResult.ToString() ?? "成员";
+                }
+            }
+        }
+
+        // 5. 计算国家排名（基于家族资金，同一国家内的排名）
+        int 国家排名 = 1;
+        using var countryRankCommand = new MySqlCommand(
+            @"SELECT COUNT(*) + 1 
+              FROM clans 
+              WHERE country_id = @country_id AND funds > @funds",
+            connection
+        );
+        countryRankCommand.Parameters.AddWithValue("@country_id", 国家ID);
+        countryRankCommand.Parameters.AddWithValue("@funds", 家族资金);
+        var countryRankResult = await countryRankCommand.ExecuteScalarAsync();
+        if (countryRankResult != null)
+        {
+            国家排名 = Convert.ToInt32(countryRankResult);
+        }
+
+        // 6. 计算世界排名（基于家族资金，所有家族中的排名）
+        int 世界排名 = 1;
+        using var worldRankCommand = new MySqlCommand(
+            @"SELECT COUNT(*) + 1 
+              FROM clans 
+              WHERE funds > @funds",
+            connection
+        );
+        worldRankCommand.Parameters.AddWithValue("@funds", 家族资金);
+        var worldRankResult = await worldRankCommand.ExecuteScalarAsync();
+        if (worldRankResult != null)
+        {
+            世界排名 = Convert.ToInt32(worldRankResult);
+        }
+
+        var 家族信息 = new ClanInfoData
+        {
+            Id = 家族ID,
+            Name = 家族名字,
+            Level = 家族等级,
+            LeaderId = 族长ID,
+            LeaderName = 族长姓名,
+            MemberCount = 成员数,
+            Prosperity = 家族繁荣值,
+            Funds = 家族资金,
+            CountryRank = 国家排名,
+            WorldRank = 世界排名,
+            PlayerRole = 玩家职位
+        };
+
+        return Results.Ok(new GetClanInfoResponse(true, "获取成功", 家族信息));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetClanInfoResponse(false, "服务器错误: " + ex.Message, null));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -1035,6 +1172,25 @@ public record GetAllPlayersResponse(bool Success, string Message, List<PlayerSum
 public record CreateClanRequest(int AccountId, string ClanName);
 
 public record CreateClanResponse(bool Success, string Message, int ClanId);
+
+public record GetClanInfoRequest(int ClanId, int PlayerId);
+
+public record GetClanInfoResponse(bool Success, string Message, ClanInfoData? Data);
+
+public class ClanInfoData
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public int Level { get; set; }
+    public int LeaderId { get; set; }
+    public string LeaderName { get; set; } = "";
+    public int MemberCount { get; set; }
+    public int Prosperity { get; set; }
+    public int Funds { get; set; }
+    public int CountryRank { get; set; }  // 国家排名（基于家族资金）
+    public int WorldRank { get; set; }     // 世界排名（基于家族资金）
+    public string PlayerRole { get; set; } = "";  // 当前玩家在家族中的职位（族长、副族长、精英、成员）
+}
 
 // 玩家数据（用于API返回）
 public class PlayerData
