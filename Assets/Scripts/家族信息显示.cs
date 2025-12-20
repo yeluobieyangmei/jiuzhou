@@ -140,7 +140,18 @@ public class 家族信息显示 : MonoBehaviour
         if (家族等级文本 != null) 家族等级文本.text = $"家族等级：{家族信息.level}";
         if (家族人数文本 != null) 家族人数文本.text = $"家族人数：{家族信息.memberCount}";
         if (家族繁荣文本 != null) 家族繁荣文本.text = $"家族繁荣：{家族信息.prosperity}";
-        if (国内排名文本 != null) 国内排名文本.text = $"国内排名：第{家族信息.countryRank}名";
+        // 国家排名：如果为0表示家族没有国家或无法计算排名
+        if (国内排名文本 != null)
+        {
+            if (家族信息.countryRank > 0)
+            {
+                国内排名文本.text = $"国内排名：第{家族信息.countryRank}名";
+            }
+            else
+            {
+                国内排名文本.text = "国内排名：无";
+            }
+        }
         if (世界排名文本 != null) 世界排名文本.text = $"世界排名：第{家族信息.worldRank}名";
         if (家族资金文本 != null) 家族资金文本.text = $"家族资金：{家族信息.funds}";
 
@@ -244,45 +255,6 @@ public class 家族信息显示 : MonoBehaviour
             }
         }
     }
-
-    /// <summary>
-    /// 延迟刷新家族显示判断（等待玩家数据更新完成）
-    /// 使用加载动画显示等待过程，确保组件在延迟期间保持激活状态
-    /// </summary>
-    static IEnumerator 延迟刷新家族显示判断(家族显示判断 家族显示判断组件, float 延迟秒数)
-    {
-        Debug.Log($"准备等待{延迟秒数}秒后刷新家族显示判断");
-        
-        // 显示加载动画，让用户知道正在处理
-        if (玩家数据管理.实例 != null && 玩家数据管理.实例.加载动画组件 != null)
-        {
-            玩家数据管理.实例.加载动画组件.开始加载动画(延迟秒数, "正在更新家族信息...");
-        }
-        
-        // 等待指定时间
-        yield return new WaitForSeconds(延迟秒数);
-        
-        Debug.Log($"{延迟秒数}秒等待完成，准备刷新家族显示判断");
-        
-        // 确保组件和GameObject都存在且激活
-        if (家族显示判断组件 != null && 家族显示判断组件.gameObject != null)
-        {
-            // 如果GameObject未激活，尝试激活它
-            if (!家族显示判断组件.gameObject.activeInHierarchy)
-            {
-                Debug.LogWarning("家族显示判断GameObject未激活，尝试激活");
-                家族显示判断组件.gameObject.SetActive(true);
-            }
-            
-            Debug.Log("开始刷新家族显示判断");
-            家族显示判断组件.刷新显示();
-        }
-        else
-        {
-            Debug.LogError("家族显示判断组件为null或GameObject为null，无法刷新！");
-        }
-    }
-
     public void 退出家族()
     {
         // 先不用管，后续完善

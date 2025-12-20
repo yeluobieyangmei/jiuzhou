@@ -24,6 +24,50 @@ string 数据库连接字符串 = "Server=localhost;Database=jiuzhou;User=root;P
 const int 最大失败次数 = 5; // 连续失败5次后锁定
 const int 锁定时长小时 = 1; // 锁定1小时
 
+// 在线账号集合（用于防止重复登录）
+// 使用线程安全的 ConcurrentDictionary
+// Key: 账号ID, Value: 最后心跳时间（DateTime）
+// 注意：服务器重启后此集合会清空，这是合理的
+var 在线账号集合 = new System.Collections.Concurrent.ConcurrentDictionary<int, DateTime>();
+
+// 心跳超时时间（秒）- 如果超过这个时间没有心跳，认为账号已离线
+const int 心跳超时秒数 = 120; // 2分钟无心跳则认为离线
+
+// 启动后台任务，定期清理超时的在线账号
+var 清理超时账号任务 = Task.Run(async () =>
+{
+    while (true)
+    {
+        try
+        {
+            await Task.Delay(60000); // 每60秒检查一次
+            
+            var 当前时间 = DateTime.Now;
+            var 需要移除的账号 = new List<int>();
+            
+            foreach (var kvp in 在线账号集合)
+            {
+                var 时间差 = (当前时间 - kvp.Value).TotalSeconds;
+                if (时间差 > 心跳超时秒数)
+                {
+                    需要移除的账号.Add(kvp.Key);
+                }
+            }
+            
+            foreach (var 账号ID in 需要移除的账号)
+            {
+                在线账号集合.TryRemove(账号ID, out _);
+            }
+            
+            // 静默清理超时账号，不输出日志（避免控制台刷屏）
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[清理超时账号任务] 错误: {ex.Message}");
+        }
+    }
+});
+
 var app = builder.Build();
 
 app.UseHttpsRedirection();
@@ -71,7 +115,14 @@ app.MapPost("/api/login", async ([FromBody] LoginRequest 请求) =>
 
             if (数据库中的密码哈希 == 输入密码哈希)
             {
-                // 密码正确，登录成功
+                // 密码正确，检查账号是否已在线
+                if (在线账号集合.ContainsKey(账号ID))
+                {
+                    reader.Close();
+                    return Results.Ok(new LoginResponse(false, "当前账号已在线，禁止重复登录！", "", -1));
+                }
+
+                // 账号未在线，登录成功
                 // 重置失败次数和锁定时间
                 reader.Close(); // 先关闭 reader，才能执行更新
                 using var updateCommand = new MySqlCommand(
@@ -80,6 +131,9 @@ app.MapPost("/api/login", async ([FromBody] LoginRequest 请求) =>
                 );
                 updateCommand.Parameters.AddWithValue("@account_id", 账号ID);
                 await updateCommand.ExecuteNonQueryAsync();
+
+                // 将账号添加到在线集合
+                在线账号集合.TryAdd(账号ID, DateTime.Now);
 
                 return Results.Ok(new LoginResponse(true, "登录成功", "TOKEN_" + Guid.NewGuid().ToString(), 账号ID));
             }
@@ -136,6 +190,34 @@ app.MapPost("/api/login", async ([FromBody] LoginRequest 请求) =>
     {
         // 如果数据库连接出错，返回错误信息（开发阶段方便调试）
         return Results.Ok(new LoginResponse(false, "服务器错误: " + ex.Message, "", -1));
+    }
+});
+
+// =================== 登出接口：POST /api/logout ===================
+
+app.MapPost("/api/logout", ([FromBody] LogoutRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new LogoutResponse(false, "账号ID无效"));
+        }
+
+        // 从在线集合中移除账号
+        if (在线账号集合.TryRemove(请求.AccountId, out _))
+        {
+            return Results.Ok(new LogoutResponse(true, "登出成功"));
+        }
+        else
+        {
+            // 账号不在线集合中（可能已经登出或服务器重启）
+            return Results.Ok(new LogoutResponse(true, "登出成功（账号未在线）"));
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new LogoutResponse(false, "服务器错误: " + ex.Message));
     }
 });
 
@@ -871,6 +953,27 @@ app.MapPost("/api/createClan", async ([FromBody] CreateClanRequest 请求) =>
             return Results.Ok(new CreateClanResponse(false, "创建家族失败：玩家必须属于某个国家", -1));
         }
 
+        // 检查解散家族冷却时间（1小时）
+        using var cooldownCommand = new MySqlCommand(
+            "SELECT last_clan_disband_time FROM players WHERE id = @player_id",
+            connection
+        );
+        cooldownCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        
+        var cooldownResult = await cooldownCommand.ExecuteScalarAsync();
+        if (cooldownResult != null && !DBNull.Value.Equals(cooldownResult))
+        {
+            DateTime 最后解散时间 = (DateTime)cooldownResult;
+            TimeSpan 时间差 = DateTime.Now - 最后解散时间;
+            const int 冷却时间小时 = 1;
+            
+            if (时间差.TotalHours < 冷却时间小时)
+            {
+                int 剩余分钟 = (int)((冷却时间小时 - 时间差.TotalHours) * 60);
+                return Results.Ok(new CreateClanResponse(false, $"创建家族失败：解散家族后需要等待{冷却时间小时}小时才能再次创建，还需等待{剩余分钟}分钟", -1));
+            }
+        }
+
         // 检查玩家是否已有家族
         using var checkClanCommand = new MySqlCommand(
             "SELECT clan_id FROM players WHERE id = @player_id",
@@ -1010,7 +1113,8 @@ app.MapPost("/api/getClanInfo", async ([FromBody] GetClanInfoRequest 请求) =>
         int 族长ID = clanReader.GetInt32(3);
         int 家族繁荣值 = clanReader.GetInt32(4);
         int 家族资金 = clanReader.GetInt32(5);
-        int 国家ID = clanReader.GetInt32(6);
+        // 处理国家ID可能为NULL的情况
+        int 国家ID = clanReader.IsDBNull(6) ? 0 : clanReader.GetInt32(6);
         clanReader.Close();
 
         // 2. 查询族长姓名
@@ -1059,31 +1163,41 @@ app.MapPost("/api/getClanInfo", async ([FromBody] GetClanInfoRequest 请求) =>
             }
         }
 
-        // 5. 计算国家排名（基于家族资金，同一国家内的排名）
-        int 国家排名 = 1;
-        using var countryRankCommand = new MySqlCommand(
-            @"SELECT COUNT(*) + 1 
-              FROM clans 
-              WHERE country_id = @country_id AND funds > @funds",
-            connection
-        );
-        countryRankCommand.Parameters.AddWithValue("@country_id", 国家ID);
-        countryRankCommand.Parameters.AddWithValue("@funds", 家族资金);
-        var countryRankResult = await countryRankCommand.ExecuteScalarAsync();
-        if (countryRankResult != null)
+        // 5. 计算国家排名（基于家族繁荣值，同一国家内的排名，由高到低降序）
+        // 注意：如果国家ID为0或NULL，则无法计算国家排名，返回0
+        int 国家排名 = 0;
+        if (国家ID > 0)
         {
-            国家排名 = Convert.ToInt32(countryRankResult);
+            // 计算有多少个同国家的家族繁荣值比当前家族高
+            // 如果繁荣值相同，则按ID排序（ID小的排名靠前）
+            using var countryRankCommand = new MySqlCommand(
+                @"SELECT COUNT(*) + 1 
+                  FROM clans 
+                  WHERE country_id = @country_id 
+                    AND (prosperity > @prosperity OR (prosperity = @prosperity AND id < @clan_id))",
+                connection
+            );
+            countryRankCommand.Parameters.AddWithValue("@country_id", 国家ID);
+            countryRankCommand.Parameters.AddWithValue("@prosperity", 家族繁荣值);
+            countryRankCommand.Parameters.AddWithValue("@clan_id", 家族ID);
+            var countryRankResult = await countryRankCommand.ExecuteScalarAsync();
+            if (countryRankResult != null)
+            {
+                国家排名 = Convert.ToInt32(countryRankResult);
+            }
         }
 
-        // 6. 计算世界排名（基于家族资金，所有家族中的排名）
+        // 6. 计算世界排名（基于家族繁荣值，所有家族中的排名，由高到低降序）
+        // 如果繁荣值相同，则按ID排序（ID小的排名靠前）
         int 世界排名 = 1;
         using var worldRankCommand = new MySqlCommand(
             @"SELECT COUNT(*) + 1 
               FROM clans 
-              WHERE funds > @funds",
+              WHERE prosperity > @prosperity OR (prosperity = @prosperity AND id < @clan_id)",
             connection
         );
-        worldRankCommand.Parameters.AddWithValue("@funds", 家族资金);
+        worldRankCommand.Parameters.AddWithValue("@prosperity", 家族繁荣值);
+        worldRankCommand.Parameters.AddWithValue("@clan_id", 家族ID);
         var worldRankResult = await worldRankCommand.ExecuteScalarAsync();
         if (worldRankResult != null)
         {
@@ -1212,13 +1326,17 @@ app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
                 await updateCountryCommand.ExecuteNonQueryAsync();
             }
 
-            // 4.2 将该家族所有成员的 clan_id 设置为 NULL
+            // 4.2 将该家族所有成员的 clan_id 设置为 NULL，并记录族长解散家族的时间（用于冷却时间）
             using var updateMembersCommand = new MySqlCommand(
-                "UPDATE players SET clan_id = NULL WHERE clan_id = @clan_id",
+                @"UPDATE players 
+                  SET clan_id = NULL,
+                      last_clan_disband_time = CASE WHEN id = @leader_id THEN NOW() ELSE last_clan_disband_time END
+                  WHERE clan_id = @clan_id",
                 connection,
                 transaction
             );
             updateMembersCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            updateMembersCommand.Parameters.AddWithValue("@leader_id", 族长ID);
             await updateMembersCommand.ExecuteNonQueryAsync();
 
             // 4.3 删除家族成员职位表中的所有记录（外键会自动处理，但显式删除更清晰）
@@ -1321,6 +1439,14 @@ public record DisbandClanRequest(int AccountId);
 
 public record DisbandClanResponse(bool Success, string Message);
 
+public record LogoutRequest(int AccountId);
+
+public record LogoutResponse(bool Success, string Message);
+
+public record HeartbeatRequest(int AccountId);
+
+public record HeartbeatResponse(bool Success, string Message);
+
 public record GetClanInfoRequest(int ClanId, int PlayerId);
 
 public record GetClanInfoResponse(bool Success, string Message, ClanInfoData? Data);
@@ -1335,8 +1461,8 @@ public class ClanInfoData
     public int MemberCount { get; set; }
     public int Prosperity { get; set; }
     public int Funds { get; set; }
-    public int CountryRank { get; set; }  // 国家排名（基于家族资金）
-    public int WorldRank { get; set; }     // 世界排名（基于家族资金）
+    public int CountryRank { get; set; }  // 国家排名（基于家族繁荣值，由高到低降序）
+    public int WorldRank { get; set; }     // 世界排名（基于家族繁荣值，由高到低降序）
     public string PlayerRole { get; set; } = "";  // 当前玩家在家族中的职位（族长、副族长、精英、成员）
 }
 

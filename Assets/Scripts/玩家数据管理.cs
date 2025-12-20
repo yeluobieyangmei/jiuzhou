@@ -12,6 +12,12 @@ public class 玩家数据管理 : MonoBehaviour
     [Header("接口地址")]
     private string 获取玩家地址 = "http://43.139.181.191:5000/api/getPlayer";
     private string 创建玩家地址 = "http://43.139.181.191:5000/api/createPlayer";
+    private string 心跳地址 = "http://43.139.181.191:5000/api/heartbeat";
+    private string 登出地址 = "http://43.139.181.191:5000/api/logout";
+    
+    // 心跳相关
+    private Coroutine 心跳协程;
+    private bool 是否已登录 = false;
 
     public 创建角色界面 创建界面;
     public 显示角色信息界面 显示角色信息界面;
@@ -38,6 +44,21 @@ public class 玩家数据管理 : MonoBehaviour
 
         // 初始化加载动画（从Resources加载预制体）
         初始化加载动画();
+    }
+    
+    private void OnEnable()
+    {
+        // 场景切换后，如果已经登录但心跳未运行，重新启动心跳
+        // 这可以防止场景切换导致心跳停止的问题
+        if (是否已登录 && 心跳协程 == null)
+        {
+            int accountId = PlayerPrefs.GetInt("AccountId", -1);
+            if (accountId > 0)
+            {
+                Debug.Log("检测到已登录但心跳未运行，重新启动心跳");
+                启动心跳();
+            }
+        }
     }
 
     /// <summary>
@@ -114,6 +135,12 @@ public class 玩家数据管理 : MonoBehaviour
                         转换并保存玩家数据(响应.data);
                         Debug.Log("玩家数据加载成功！");
                         
+                        // 启动心跳（如果还没有启动）
+                        if (!是否已登录)
+                        {
+                            启动心跳();
+                        }
+                        
                         if (创建界面 != null)
                         {
                             创建界面.gameObject.SetActive(false);
@@ -130,6 +157,12 @@ public class 玩家数据管理 : MonoBehaviour
                     {
                         // 没有角色，需要创建
                         Debug.Log("该账号尚未创建角色，需要创建角色");
+                        
+                        // 启动心跳（如果还没有启动）
+                        if (!是否已登录)
+                        {
+                            启动心跳();
+                        }
 
                         // 隐藏角色信息界面（如果有）
                         if (显示角色信息界面 != null)
@@ -413,6 +446,161 @@ public class 玩家数据管理 : MonoBehaviour
             Debug.LogError("国家信息显示组件为null或GameObject为null，无法刷新！");
         }
     }
+    
+    /// <summary>
+    /// 启动心跳协程（每30秒发送一次心跳）
+    /// </summary>
+    private void 启动心跳()
+    {
+        if (心跳协程 != null)
+        {
+            StopCoroutine(心跳协程);
+        }
+        
+        是否已登录 = true;
+        心跳协程 = StartCoroutine(心跳协程方法());
+        Debug.Log("心跳已启动，每30秒发送一次");
+    }
+    
+    /// <summary>
+    /// 停止心跳协程
+    /// </summary>
+    private void 停止心跳()
+    {
+        if (心跳协程 != null)
+        {
+            StopCoroutine(心跳协程);
+            心跳协程 = null;
+        }
+        是否已登录 = false;
+        Debug.Log("心跳已停止");
+    }
+    
+    /// <summary>
+    /// 心跳协程方法（每30秒发送一次心跳请求）
+    /// </summary>
+    IEnumerator 心跳协程方法()
+    {
+        while (是否已登录)
+        {
+            yield return new WaitForSeconds(30f); // 等待30秒
+            
+            int accountId = PlayerPrefs.GetInt("AccountId", -1);
+            if (accountId <= 0)
+            {
+                Debug.LogWarning("心跳失败：未找到账号ID");
+                停止心跳();
+                yield break;
+            }
+            
+            // 发送心跳请求
+            StartCoroutine(发送心跳请求(accountId));
+        }
+    }
+    
+    /// <summary>
+    /// 发送心跳请求到服务器
+    /// </summary>
+    IEnumerator 发送心跳请求(int accountId)
+    {
+        string json数据 = $"{{\"accountId\":{accountId}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(心跳地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogWarning("心跳请求失败: " + 请求.error);
+                // 心跳失败可能是网络问题，不停止心跳，继续尝试
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                心跳响应 响应 = JsonUtility.FromJson<心跳响应>(返回文本);
+                if (响应 != null)
+                {
+                    if (!响应.success)
+                    {
+                        Debug.LogWarning("心跳失败: " + 响应.message);
+                        // 如果服务器返回账号未在线，停止心跳
+                        if (响应.message.Contains("账号未在线"))
+                        {
+                            停止心跳();
+                        }
+                    }
+                    else
+                    {
+                        Debug.Log("心跳成功");
+                    }
+                }
+            }
+        }
+    }
+    
+    /// <summary>
+    /// 登出（停止心跳并通知服务器）
+    /// </summary>
+    public void 登出()
+    {
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId > 0)
+        {
+            StartCoroutine(发送登出请求(accountId));
+        }
+        
+        停止心跳();
+    }
+    
+    /// <summary>
+    /// 发送登出请求到服务器
+    /// </summary>
+    IEnumerator 发送登出请求(int accountId)
+    {
+        string json数据 = $"{{\"accountId\":{accountId}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(登出地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogWarning("登出请求失败: " + 请求.error);
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("登出响应: " + 返回文本);
+            }
+        }
+    }
+    
+    private void OnDestroy()
+    {
+        // 组件销毁时停止心跳
+        停止心跳();
+    }
+}
+
+// =================== 心跳响应数据类 ===================
+
+[System.Serializable]
+public class 心跳响应
+{
+    public bool success;
+    public string message;
 }
 
 // =================== 服务端返回的数据结构 ===================

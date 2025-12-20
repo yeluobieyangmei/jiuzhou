@@ -130,7 +130,7 @@ public class 创建家族 : MonoBehaviour
                     }
                     else
                     {
-                        Debug.LogError("创建家族失败: " + 响应.message);
+                        通用提示框.显示("创建家族失败" + 响应.message);
                         显示提示("创建失败：" + 响应.message);
                     }
                 }
