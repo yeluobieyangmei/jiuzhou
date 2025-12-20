@@ -1375,6 +1375,157 @@ app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
     }
 });
 
+// =================== 家族捐献接口：POST /api/donateClan ===================
+
+app.MapPost("/api/donateClan", async ([FromBody] DonateClanRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new DonateClanResponse(false, "账号ID无效", false));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息，确认玩家存在且有家族
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, clan_id, copper_money, last_donate_date FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new DonateClanResponse(false, "玩家不存在或尚未创建角色", false));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        int? 家族ID = playerReader.IsDBNull(1) ? null : playerReader.GetInt32(1);
+        int 玩家铜钱 = playerReader.GetInt32(2);
+        DateTime? 最后捐献日期 = playerReader.IsDBNull(3) ? null : playerReader.GetDateTime(3);
+        playerReader.Close();
+
+        // 检查玩家是否有家族
+        if (!家族ID.HasValue || 家族ID.Value <= 0)
+        {
+            return Results.Ok(new DonateClanResponse(false, "捐献失败：玩家不属于任何家族", false));
+        }
+
+        // 2. 检查今日是否已捐献（0点后刷新）
+        DateTime 今天 = DateTime.Today;
+        if (最后捐献日期.HasValue && 最后捐献日期.Value.Date == 今天)
+        {
+            return Results.Ok(new DonateClanResponse(false, "今日已捐献，请明天再来！", true));
+        }
+
+        // 3. 检查玩家铜钱是否足够（需要10000铜钱）
+        const int 捐献消耗铜钱 = 10000;
+        if (玩家铜钱 < 捐献消耗铜钱)
+        {
+            return Results.Ok(new DonateClanResponse(false, "捐献失败：需要10000铜钱", false));
+        }
+
+        // 4. 开始事务：扣除玩家铜钱，增加家族资金和繁荣值，更新最后捐献日期
+        using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            // 4.1 扣除玩家铜钱并更新最后捐献日期
+            using var updatePlayerCommand = new MySqlCommand(
+                @"UPDATE players 
+                  SET copper_money = copper_money - @cost_copper, 
+                      last_donate_date = CURDATE() 
+                  WHERE id = @player_id",
+                connection,
+                transaction
+            );
+            updatePlayerCommand.Parameters.AddWithValue("@cost_copper", 捐献消耗铜钱);
+            updatePlayerCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            await updatePlayerCommand.ExecuteNonQueryAsync();
+
+            // 4.2 增加家族资金（+100）和繁荣值（+10）
+            using var updateClanCommand = new MySqlCommand(
+                @"UPDATE clans 
+                  SET funds = funds + 100, 
+                      prosperity = prosperity + 10 
+                  WHERE id = @clan_id",
+                connection,
+                transaction
+            );
+            updateClanCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            await updateClanCommand.ExecuteNonQueryAsync();
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new DonateClanResponse(true, "捐献成功！家族资金+100，繁荣值+10", false));
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new DonateClanResponse(false, "服务器错误: " + ex.Message, false));
+    }
+});
+
+// =================== 检查今日是否已捐献接口：POST /api/checkDonateStatus ===================
+
+app.MapPost("/api/checkDonateStatus", async ([FromBody] CheckDonateStatusRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new CheckDonateStatusResponse(false, "账号ID无效", false));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 先检查玩家是否存在
+        using var checkPlayerCommand = new MySqlCommand(
+            "SELECT id FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        checkPlayerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+        
+        var playerExists = await checkPlayerCommand.ExecuteScalarAsync();
+        if (playerExists == null)
+        {
+            return Results.Ok(new CheckDonateStatusResponse(false, "玩家不存在", false));
+        }
+
+        // 查询玩家最后捐献日期
+        using var command = new MySqlCommand(
+            "SELECT last_donate_date FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        command.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        var result = await command.ExecuteScalarAsync();
+        
+        // 如果result是DBNull.Value，说明玩家从未捐献过（last_donate_date为NULL）
+        DateTime? 最后捐献日期 = (result == null || result == DBNull.Value) ? null : (DateTime?)result;
+        DateTime 今天 = DateTime.Today;
+        
+        // 如果最后捐献日期是今天，说明今日已捐献
+        bool 今日已捐献 = 最后捐献日期.HasValue && 最后捐献日期.Value.Date == 今天;
+
+        return Results.Ok(new CheckDonateStatusResponse(true, 今日已捐献 ? "今日已捐献" : "今日未捐献", 今日已捐献));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new CheckDonateStatusResponse(false, "服务器错误: " + ex.Message, false));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -1450,6 +1601,14 @@ public record HeartbeatResponse(bool Success, string Message);
 public record GetClanInfoRequest(int ClanId, int PlayerId);
 
 public record GetClanInfoResponse(bool Success, string Message, ClanInfoData? Data);
+
+public record DonateClanRequest(int AccountId);
+
+public record DonateClanResponse(bool Success, string Message, bool AlreadyDonated);
+
+public record CheckDonateStatusRequest(int AccountId);
+
+public record CheckDonateStatusResponse(bool Success, string Message, bool AlreadyDonated);
 
 public class ClanInfoData
 {

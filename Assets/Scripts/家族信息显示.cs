@@ -26,6 +26,8 @@ public class 家族信息显示 : MonoBehaviour
     [Header("接口地址")]
     private string 获取家族信息地址 = "http://43.139.181.191:5000/api/getClanInfo";
     private string 解散家族地址 = "http://43.139.181.191:5000/api/disbandClan";
+    private string 捐献家族地址 = "http://43.139.181.191:5000/api/donateClan";
+    private string 检查捐献状态地址 = "http://43.139.181.191:5000/api/checkDonateStatus";
     
     [Header("其他引用")]
     public 家族显示判断 家族显示判断;
@@ -267,15 +269,189 @@ public class 家族信息显示 : MonoBehaviour
         // TODO: 实现退出家族的网络请求
     }
 
-    public void 捐献()
+    /// <summary>
+    /// 点击捐献按钮（首先判断今日是否已捐献）
+    /// </summary>
+    public void 点击捐献按钮()
     {
-        // 先不用管，后续完善
-        // 玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
-        // if (当前玩家 == null || 当前玩家.家族 == null)
-        // {
-        //     return;
-        // }
-        // TODO: 实现捐献的网络请求
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null)
+        {
+            通用提示框.显示("无法获取当前玩家数据，无法捐献");
+            return;
+        }
+
+        if (当前玩家.家族 == null || 当前玩家.家族.家族ID <= 0)
+        {
+            通用提示框.显示("当前玩家没有家族，无法捐献");
+            return;
+        }
+
+        // 检查今日是否已捐献（通过服务器检查）
+        StartCoroutine(检查今日是否已捐献());
+    }
+
+    /// <summary>
+    /// 检查今日是否已捐献（通过服务器检查）
+    /// </summary>
+    IEnumerator 检查今日是否已捐献()
+    {
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            通用提示框.显示("捐献失败：未找到账号ID，请先登录");
+            yield break;
+        }
+
+        string json数据 = $"{{\"accountId\":{accountId}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(检查捐献状态地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("检查捐献状态出错: " + 请求.error);
+                通用提示框.显示("检查捐献状态失败：网络错误");
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("检查捐献状态响应: " + 返回文本);
+
+                检查捐献状态响应 响应 = JsonUtility.FromJson<检查捐献状态响应>(返回文本);
+                if (响应 != null && 响应.success)
+                {
+                    if (响应.alreadyDonated)
+                    {
+                        // 今日已捐献，直接提示
+                        通用提示框.显示("今日已捐献！");
+                    }
+                    else
+                    {
+                        // 今日未捐献，显示说明弹窗
+                        if (通用说明弹窗.实例 != null)
+                        {
+                            通用说明弹窗.显示(
+                                "家族捐献",
+                                "玩家每日可消耗1万铜钱进行家族捐献，捐献成功将增加本家族家族资金100，家族繁荣值10。凌晨后可再次捐献。",
+                                捐献
+                            );
+                        }
+                        else
+                        {
+                            Debug.LogError("通用说明弹窗.实例 未初始化，无法显示说明弹窗");
+                            // 如果说明弹窗不存在，直接调用捐献方法
+                            捐献();
+                        }
+                    }
+                }
+                else
+                {
+                    通用提示框.显示("检查捐献状态失败: " + (响应 != null ? 响应.message : "解析错误"));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 捐献（网络版）
+    /// </summary>
+    private void 捐献()
+    {
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null)
+        {
+            通用提示框.显示("无法获取当前玩家数据，无法捐献");
+            return;
+        }
+
+        if (当前玩家.家族 == null || 当前玩家.家族.家族ID <= 0)
+        {
+            通用提示框.显示("当前玩家没有家族，无法捐献");
+            return;
+        }
+
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            通用提示框.显示("捐献失败：未找到账号ID，请先登录");
+            return;
+        }
+
+        // 发送捐献请求
+        StartCoroutine(发送捐献请求(accountId));
+    }
+
+    /// <summary>
+    /// 发送捐献请求到服务器
+    /// </summary>
+    IEnumerator 发送捐献请求(int accountId)
+    {
+        string json数据 = $"{{\"accountId\":{accountId}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(捐献家族地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("捐献出错: " + 请求.error);
+                通用提示框.显示("捐献失败：网络错误");
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("捐献响应: " + 返回文本);
+
+                捐献家族响应 响应 = JsonUtility.FromJson<捐献家族响应>(返回文本);
+                if (响应 != null)
+                {
+                    if (响应.success)
+                    {
+                        通用提示框.显示(响应.message);
+
+                        // 刷新玩家数据（会更新铜钱和家族信息）
+                        if (玩家数据管理.实例 != null)
+                        {
+                            玩家数据管理.实例.获取玩家数据(accountId);
+                        }
+
+                        // 延迟刷新家族信息显示（等待玩家数据更新完成）
+                        yield return new WaitForSeconds(0.5f);
+                        刷新显示();
+                    }
+                    else
+                    {
+                        // 如果今日已捐献，AlreadyDonated为true
+                        if (响应.alreadyDonated)
+                        {
+                            通用提示框.显示("今日已捐献！");
+                        }
+                        else
+                        {
+                            通用提示框.显示(响应.message);
+                        }
+                    }
+                }
+                else
+                {
+                    通用提示框.显示("捐献失败：解析响应失败");
+                }
+            }
+        }
     }
 }
 
@@ -310,4 +486,20 @@ public class 解散家族响应
 {
     public bool success;
     public string message;
+}
+
+[System.Serializable]
+public class 捐献家族响应
+{
+    public bool success;
+    public string message;
+    public bool alreadyDonated;  // 是否今日已捐献
+}
+
+[System.Serializable]
+public class 检查捐献状态响应
+{
+    public bool success;
+    public string message;
+    public bool alreadyDonated;  // 是否今日已捐献
 }
