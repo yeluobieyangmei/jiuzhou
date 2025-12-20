@@ -8,6 +8,7 @@ public class 家族显示判断 : MonoBehaviour
 {
     public 家族信息显示 家族信息显示;
     public GameObject 无家族界面;
+    public 家族列表显示 家族列表显示;
     private void OnEnable()
     {
         刷新显示();
@@ -26,5 +27,11 @@ public class 家族显示判断 : MonoBehaviour
             家族信息显示.gameObject.SetActive(false);
             无家族界面.gameObject.SetActive(true);
         }
+    }
+
+    public void 点击加入家族按钮()
+    {
+        家族列表显示.当前显示类型 = 家族列表显示.显示类型.申请家族;
+        家族列表显示.gameObject.SetActive(true);
     }
 }

@@ -1526,6 +1526,411 @@ app.MapPost("/api/checkDonateStatus", async ([FromBody] CheckDonateStatusRequest
     }
 });
 
+// =================== 加入家族接口：POST /api/joinClan ===================
+
+app.MapPost("/api/joinClan", async ([FromBody] JoinClanRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new JoinClanResponse(false, "账号ID无效"));
+        }
+
+        if (请求.ClanId <= 0)
+        {
+            return Results.Ok(new JoinClanResponse(false, "家族ID无效"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息，确认玩家存在且没有家族
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, clan_id FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new JoinClanResponse(false, "玩家不存在或尚未创建角色"));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        int? 当前家族ID = playerReader.IsDBNull(1) ? null : playerReader.GetInt32(1);
+        playerReader.Close();
+
+        // 检查玩家是否已经有家族
+        if (当前家族ID.HasValue && 当前家族ID.Value > 0)
+        {
+            return Results.Ok(new JoinClanResponse(false, "加入家族失败：玩家已经属于某个家族"));
+        }
+
+        // 2. 查询家族信息，检查家族是否存在和人数是否已满
+        using var clanCommand = new MySqlCommand(
+            "SELECT id, level, country_id FROM clans WHERE id = @clan_id",
+            connection
+        );
+        clanCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+
+        using var clanReader = await clanCommand.ExecuteReaderAsync();
+        if (!await clanReader.ReadAsync())
+        {
+            return Results.Ok(new JoinClanResponse(false, "加入家族失败：家族不存在"));
+        }
+
+        int 家族ID = clanReader.GetInt32(0);
+        int 家族等级 = clanReader.GetInt32(1);
+        int? 家族国家ID = clanReader.IsDBNull(2) ? null : clanReader.GetInt32(2);
+        clanReader.Close();
+
+        // 3. 计算家族人数上限（1级10人，每级+10人，最高5级50人）
+        int 人数上限 = 10 + (家族等级 - 1) * 10;
+        if (人数上限 > 50) 人数上限 = 50;
+
+        // 4. 查询当前家族成员数
+        using var memberCountCommand = new MySqlCommand(
+            "SELECT COUNT(*) FROM players WHERE clan_id = @clan_id",
+            connection
+        );
+        memberCountCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        var memberCountResult = await memberCountCommand.ExecuteScalarAsync();
+        int 当前成员数 = memberCountResult != null ? Convert.ToInt32(memberCountResult) : 0;
+
+        // 5. 检查人数是否已满
+        if (当前成员数 >= 人数上限)
+        {
+            return Results.Ok(new JoinClanResponse(false, $"加入家族失败：家族人数已满（{当前成员数}/{人数上限}）"));
+        }
+
+        // 6. 开始事务：更新玩家的家族ID，添加成员职位记录
+        using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            // 6.1 更新玩家的家族ID
+            using var updatePlayerCommand = new MySqlCommand(
+                "UPDATE players SET clan_id = @clan_id WHERE id = @player_id",
+                connection,
+                transaction
+            );
+            updatePlayerCommand.Parameters.AddWithValue("@clan_id", 家族ID);
+            updatePlayerCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            await updatePlayerCommand.ExecuteNonQueryAsync();
+
+            // 6.2 在家族成员职位表中添加成员职位记录（默认是"成员"）
+            using var insertRoleCommand = new MySqlCommand(
+                "INSERT INTO clan_member_roles (clan_id, player_id, role) VALUES (@clan_id, @player_id, 'member')",
+                connection,
+                transaction
+            );
+            insertRoleCommand.Parameters.AddWithValue("@clan_id", 家族ID);
+            insertRoleCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            await insertRoleCommand.ExecuteNonQueryAsync();
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new JoinClanResponse(true, "加入家族成功！"));
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new JoinClanResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
+// =================== 退出家族接口：POST /api/leaveClan ===================
+
+app.MapPost("/api/leaveClan", async ([FromBody] LeaveClanRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new LeaveClanResponse(false, "账号ID无效"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息，确认玩家存在且有家族
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, clan_id FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new LeaveClanResponse(false, "玩家不存在或尚未创建角色"));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        int? 家族ID = playerReader.IsDBNull(1) ? null : playerReader.GetInt32(1);
+        playerReader.Close();
+
+        // 检查玩家是否有家族
+        if (!家族ID.HasValue || 家族ID.Value <= 0)
+        {
+            return Results.Ok(new LeaveClanResponse(false, "退出家族失败：玩家不属于任何家族"));
+        }
+
+        // 2. 查询家族信息，确认玩家不是族长（族长不能退出，只能解散）
+        using var clanCommand = new MySqlCommand(
+            "SELECT leader_id FROM clans WHERE id = @clan_id",
+            connection
+        );
+        clanCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+
+        using var clanReader = await clanCommand.ExecuteReaderAsync();
+        if (!await clanReader.ReadAsync())
+        {
+            return Results.Ok(new LeaveClanResponse(false, "退出家族失败：家族不存在"));
+        }
+
+        int 族长ID = clanReader.GetInt32(0);
+        clanReader.Close();
+
+        // 检查玩家是否是族长
+        if (玩家ID == 族长ID)
+        {
+            return Results.Ok(new LeaveClanResponse(false, "退出家族失败：族长不能退出家族，请使用解散家族功能"));
+        }
+
+        // 3. 开始事务：更新玩家的家族ID为NULL，删除成员职位记录，更新退出家族时间
+        using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            // 3.1 更新玩家的家族ID为NULL，并记录退出家族时间
+            using var updatePlayerCommand = new MySqlCommand(
+                @"UPDATE players 
+                  SET clan_id = NULL, 
+                      last_clan_leave_time = NOW() 
+                  WHERE id = @player_id",
+                connection,
+                transaction
+            );
+            updatePlayerCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            await updatePlayerCommand.ExecuteNonQueryAsync();
+
+            // 3.2 删除家族成员职位记录
+            using var deleteRoleCommand = new MySqlCommand(
+                "DELETE FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id",
+                connection,
+                transaction
+            );
+            deleteRoleCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            deleteRoleCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            await deleteRoleCommand.ExecuteNonQueryAsync();
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new LeaveClanResponse(true, "退出家族成功！"));
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new LeaveClanResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
+// =================== 检查退出家族冷却时间接口：POST /api/checkLeaveClanCooldown ===================
+
+app.MapPost("/api/checkLeaveClanCooldown", async ([FromBody] CheckLeaveClanCooldownRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new CheckLeaveClanCooldownResponse(false, "账号ID无效", false, 0));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询玩家退出家族时间
+        using var command = new MySqlCommand(
+            "SELECT last_clan_leave_time FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        command.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        var result = await command.ExecuteScalarAsync();
+        if (result == null || result == DBNull.Value)
+        {
+            return Results.Ok(new CheckLeaveClanCooldownResponse(false, "玩家不存在", false, 0));
+        }
+
+        DateTime? 退出家族时间 = result == DBNull.Value ? null : (DateTime?)result;
+        
+        // 如果从未退出过家族，没有冷却时间
+        if (!退出家族时间.HasValue)
+        {
+            return Results.Ok(new CheckLeaveClanCooldownResponse(true, "可以加入家族", false, 0));
+        }
+
+        // 计算冷却时间（1小时 = 3600秒）
+        TimeSpan 时间差 = DateTime.Now - 退出家族时间.Value;
+        int 剩余秒数 = 3600 - (int)时间差.TotalSeconds;
+        
+        // 如果还在冷却中
+        if (剩余秒数 > 0)
+        {
+            int 剩余分钟 = (剩余秒数 + 59) / 60; // 向上取整到分钟
+            return Results.Ok(new CheckLeaveClanCooldownResponse(true, $"冷却中，剩余{剩余分钟}分钟", true, 剩余分钟));
+        }
+        else
+        {
+            return Results.Ok(new CheckLeaveClanCooldownResponse(true, "可以加入家族", false, 0));
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new CheckLeaveClanCooldownResponse(false, "服务器错误: " + ex.Message, false, 0));
+    }
+});
+
+// =================== 获取指定国家的家族列表接口：POST /api/getClansByCountry ===================
+
+app.MapPost("/api/getClansByCountry", async ([FromBody] GetClansByCountryRequest 请求) =>
+{
+    try
+    {
+        if (请求.CountryId <= 0)
+        {
+            return Results.Ok(new GetClansListResponse(false, "国家ID无效", new List<ClanSummary>()));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询指定国家的所有家族，按繁荣值降序排序（相同繁荣值按ID升序）
+        // 使用子查询一次性获取成员数
+        using var command = new MySqlCommand(
+            @"SELECT c.id, c.name, c.level, c.prosperity, c.funds, c.leader_id, p.name as leader_name,
+                     (SELECT COUNT(*) FROM players WHERE clan_id = c.id) as member_count
+              FROM clans c
+              LEFT JOIN players p ON c.leader_id = p.id
+              WHERE c.country_id = @country_id
+              ORDER BY c.prosperity DESC, c.id ASC",
+            connection
+        );
+        command.Parameters.AddWithValue("@country_id", 请求.CountryId);
+
+        var 家族列表 = new List<ClanSummary>();
+        using var reader = await command.ExecuteReaderAsync();
+        
+        while (await reader.ReadAsync())
+        {
+            int 家族ID = reader.GetInt32(0);
+            string 家族名字 = reader.GetString(1);
+            int 家族等级 = reader.GetInt32(2);
+            int 家族繁荣值 = reader.GetInt32(3);
+            int 家族资金 = reader.GetInt32(4);
+            int 族长ID = reader.GetInt32(5);
+            string 族长姓名 = reader.IsDBNull(6) ? "" : reader.GetString(6);
+            int 成员数 = reader.GetInt32(7);
+
+            家族列表.Add(new ClanSummary
+            {
+                Id = 家族ID,
+                Name = 家族名字,
+                Level = 家族等级,
+                Prosperity = 家族繁荣值,
+                Funds = 家族资金,
+                LeaderId = 族长ID,
+                LeaderName = 族长姓名,
+                MemberCount = 成员数
+            });
+        }
+
+        return Results.Ok(new GetClansListResponse(true, "获取成功", 家族列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetClansListResponse(false, "服务器错误: " + ex.Message, new List<ClanSummary>()));
+    }
+});
+
+// =================== 获取所有家族列表接口：GET /api/getAllClans ===================
+
+app.MapGet("/api/getAllClans", async () =>
+{
+    try
+    {
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询所有家族，按繁荣值降序排序（相同繁荣值按ID升序）
+        // 使用子查询一次性获取成员数
+        using var command = new MySqlCommand(
+            @"SELECT c.id, c.name, c.level, c.prosperity, c.funds, c.leader_id, p.name as leader_name, 
+                     c.country_id, co.name as country_name, co.code as country_code,
+                     (SELECT COUNT(*) FROM players WHERE clan_id = c.id) as member_count
+              FROM clans c
+              LEFT JOIN players p ON c.leader_id = p.id
+              LEFT JOIN countries co ON c.country_id = co.id
+              ORDER BY c.prosperity DESC, c.id ASC",
+            connection
+        );
+
+        var 家族列表 = new List<ClanSummary>();
+        using var reader = await command.ExecuteReaderAsync();
+        
+        while (await reader.ReadAsync())
+        {
+            int 家族ID = reader.GetInt32(0);
+            string 家族名字 = reader.GetString(1);
+            int 家族等级 = reader.GetInt32(2);
+            int 家族繁荣值 = reader.GetInt32(3);
+            int 家族资金 = reader.GetInt32(4);
+            int 族长ID = reader.GetInt32(5);
+            string 族长姓名 = reader.IsDBNull(6) ? "" : reader.GetString(6);
+            int? 国家ID = reader.IsDBNull(7) ? null : reader.GetInt32(7);
+            string 国家名字 = reader.IsDBNull(8) ? "" : reader.GetString(8);
+            string 国家代码 = reader.IsDBNull(9) ? "" : reader.GetString(9);
+            int 成员数 = reader.GetInt32(10);
+
+            家族列表.Add(new ClanSummary
+            {
+                Id = 家族ID,
+                Name = 家族名字,
+                Level = 家族等级,
+                Prosperity = 家族繁荣值,
+                Funds = 家族资金,
+                LeaderId = 族长ID,
+                LeaderName = 族长姓名,
+                MemberCount = 成员数,
+                CountryId = 国家ID ?? -1,
+                CountryName = 国家名字,
+                CountryCode = 国家代码
+            });
+        }
+
+        return Results.Ok(new GetClansListResponse(true, "获取成功", 家族列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetClansListResponse(false, "服务器错误: " + ex.Message, new List<ClanSummary>()));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -1609,6 +2014,37 @@ public record DonateClanResponse(bool Success, string Message, bool AlreadyDonat
 public record CheckDonateStatusRequest(int AccountId);
 
 public record CheckDonateStatusResponse(bool Success, string Message, bool AlreadyDonated);
+
+public record JoinClanRequest(int AccountId, int ClanId);
+
+public record JoinClanResponse(bool Success, string Message);
+
+public record LeaveClanRequest(int AccountId);
+
+public record LeaveClanResponse(bool Success, string Message);
+
+public record CheckLeaveClanCooldownRequest(int AccountId);
+
+public record CheckLeaveClanCooldownResponse(bool Success, string Message, bool InCooldown, int RemainingMinutes);
+
+public record GetClansByCountryRequest(int CountryId);
+
+public record GetClansListResponse(bool Success, string Message, List<ClanSummary> Data);
+
+public class ClanSummary
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = "";
+    public int Level { get; set; }
+    public int Prosperity { get; set; }
+    public int Funds { get; set; }
+    public int LeaderId { get; set; }
+    public string LeaderName { get; set; } = "";
+    public int MemberCount { get; set; }
+    public int CountryId { get; set; } = -1;  // -1 表示没有国家
+    public string CountryName { get; set; } = "";
+    public string CountryCode { get; set; } = "";
+}
 
 public class ClanInfoData
 {

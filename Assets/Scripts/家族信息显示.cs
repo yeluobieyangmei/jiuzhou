@@ -26,12 +26,15 @@ public class 家族信息显示 : MonoBehaviour
     [Header("接口地址")]
     private string 获取家族信息地址 = "http://43.139.181.191:5000/api/getClanInfo";
     private string 解散家族地址 = "http://43.139.181.191:5000/api/disbandClan";
+    private string 退出家族地址 = "http://43.139.181.191:5000/api/leaveClan";
     private string 捐献家族地址 = "http://43.139.181.191:5000/api/donateClan";
     private string 检查捐献状态地址 = "http://43.139.181.191:5000/api/checkDonateStatus";
     
     [Header("其他引用")]
     public 家族显示判断 家族显示判断;
     public GameObject 无家族界面;
+
+    public 家族列表显示 家族列表显示;
     
     //public 显示家族列表 显示家族列表;  显示家族列表尚未实现，此处先写补上格式 后续完善
     
@@ -257,16 +260,132 @@ public class 家族信息显示 : MonoBehaviour
             }
         }
     }
+    /// <summary>
+    /// 退出家族
+    /// </summary>
     public void 退出家族()
     {
-        // 先不用管，后续完善
-        // 玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
-        // if (当前玩家 == null || 当前玩家.家族 == null)
-        // {
-        //     通用提示框.显示("当前没有家族!");
-        //     return;
-        // }
-        // TODO: 实现退出家族的网络请求
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null)
+        {
+            通用提示框.显示("无法获取当前玩家数据，无法退出家族");
+            return;
+        }
+
+        if (当前玩家.家族 == null || 当前玩家.家族.家族ID <= 0)
+        {
+            通用提示框.显示("当前没有家族！");
+            return;
+        }
+
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            通用提示框.显示("退出家族失败：未找到账号ID，请先登录");
+            return;
+        }
+
+        // 发送退出家族请求
+        StartCoroutine(发送退出家族请求(accountId));
+    }
+
+    /// <summary>
+    /// 发送退出家族请求到服务器
+    /// </summary>
+    IEnumerator 发送退出家族请求(int accountId)
+    {
+        string json数据 = $"{{\"accountId\":{accountId}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(退出家族地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("退出家族出错: " + 请求.error);
+                通用提示框.显示("退出家族失败：网络错误");
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("退出家族响应: " + 返回文本);
+
+                退出家族响应 响应 = JsonUtility.FromJson<退出家族响应>(返回文本);
+                if (响应 != null)
+                {
+                    if (响应.success)
+                    {
+                        通用提示框.显示(响应.message);
+
+                        // 刷新玩家数据（会更新家族信息，家族应该变为null）
+                        if (玩家数据管理.实例 != null)
+                        {
+                            玩家数据管理.实例.获取玩家数据(accountId);
+                        }
+
+                        // 关闭家族信息显示界面
+                        this.gameObject.SetActive(false);
+
+                        // 3秒后执行家族显示判断的刷新显示
+                        if (家族显示判断 != null)
+                        {
+                            玩家数据管理.实例.StartCoroutine(延迟刷新家族显示判断(家族显示判断, 3f));
+                        }
+                    }
+                    else
+                    {
+                        通用提示框.显示(响应.message);
+                    }
+                }
+                else
+                {
+                    通用提示框.显示("退出家族失败：解析响应失败");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 延迟刷新家族显示判断（等待玩家数据更新完成）
+    /// </summary>
+    static IEnumerator 延迟刷新家族显示判断(家族显示判断 家族显示判断组件, float 延迟秒数)
+    {
+        Debug.Log($"准备等待{延迟秒数}秒后刷新家族显示判断");
+        
+        // 显示加载动画，让用户知道正在处理
+        if (玩家数据管理.实例 != null && 玩家数据管理.实例.加载动画组件 != null)
+        {
+            玩家数据管理.实例.加载动画组件.开始加载动画(延迟秒数, "正在更新家族信息...");
+        }
+        
+        // 等待指定时间
+        yield return new WaitForSeconds(延迟秒数);
+        
+        Debug.Log($"{延迟秒数}秒等待完成，准备刷新家族显示判断");
+        
+        // 确保组件和GameObject都存在且激活
+        if (家族显示判断组件 != null && 家族显示判断组件.gameObject != null)
+        {
+            // 如果GameObject未激活，尝试激活它
+            if (!家族显示判断组件.gameObject.activeInHierarchy)
+            {
+                Debug.LogWarning("家族显示判断GameObject未激活，尝试激活");
+                家族显示判断组件.gameObject.SetActive(true);
+            }
+            
+            Debug.Log("开始刷新家族显示判断");
+            家族显示判断组件.刷新显示();
+        }
+        else
+        {
+            Debug.LogError("家族显示判断组件为null或GameObject为null，无法刷新！");
+        }
     }
 
     /// <summary>
@@ -453,6 +572,18 @@ public class 家族信息显示 : MonoBehaviour
             }
         }
     }
+
+    public void 查看国内排名()
+    {
+        家族列表显示.当前显示类型 = 家族列表显示.显示类型.国家排名查看;
+        家族列表显示.gameObject.SetActive(true);
+    }
+
+    public void 查看世界排名()
+    {
+        家族列表显示.当前显示类型 = 家族列表显示.显示类型.世界排名查看;
+        家族列表显示.gameObject.SetActive(true);
+    }
 }
 
 // =================== 响应数据类 ===================
@@ -483,6 +614,13 @@ public class 家族信息数据
 
 [System.Serializable]
 public class 解散家族响应
+{
+    public bool success;
+    public string message;
+}
+
+[System.Serializable]
+public class 退出家族响应
 {
     public bool success;
     public string message;
