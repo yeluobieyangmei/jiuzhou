@@ -25090,7 +25090,8 @@ MonoBehaviour:
   "\u56FD\u5185\u6392\u540D\u6587\u672C": {fileID: 0}
   "\u4E16\u754C\u6392\u540D\u6587\u672C": {fileID: 0}
   "\u5BB6\u65CF\u8D44\u91D1\u6587\u672C": {fileID: 0}
-  "\u5BB6\u65CF\u663E\u793A\u5224\u65AD": {fileID: 0}
+  "\u5BB6\u65CF\u663E\u793A\u5224\u65AD": {fileID: 1008152146260928024}
+  "\u65E0\u5BB6\u65CF\u754C\u9762": {fileID: 1008152146627305834}
 --- !u!224 &1008152147747146119
 RectTransform:
   m_ObjectHideFlags: 0

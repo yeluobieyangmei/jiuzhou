@@ -29,6 +29,7 @@ public class 家族信息显示 : MonoBehaviour
     
     [Header("其他引用")]
     public 家族显示判断 家族显示判断;
+    public GameObject 无家族界面;
     
     //public 显示家族列表 显示家族列表;  显示家族列表尚未实现，此处先写补上格式 后续完善
     
@@ -226,22 +227,9 @@ public class 家族信息显示 : MonoBehaviour
                             玩家数据管理.实例.获取玩家数据(accountId);
                         }
 
-                        // 关闭家族信息显示界面（因为已经没有家族了）
-                        gameObject.SetActive(false);
-
-                        // 刷新家族显示判断（会显示"无家族"界面）
-                        if (家族显示判断 != null)
-                        {
-                            // 延迟刷新，等待玩家数据更新完成
-                            if (玩家数据管理.实例 != null)
-                            {
-                                玩家数据管理.实例.StartCoroutine(延迟刷新家族显示判断(家族显示判断, 1f));
-                            }
-                            else
-                            {
-                                家族显示判断.刷新显示();
-                            }
-                        }
+                        // 直接关闭家族信息显示界面，显示无家族界面
+                        无家族界面.SetActive(true);
+                        this.gameObject.SetActive(false);
                     }
                     else
                     {
@@ -259,13 +247,39 @@ public class 家族信息显示 : MonoBehaviour
 
     /// <summary>
     /// 延迟刷新家族显示判断（等待玩家数据更新完成）
+    /// 使用加载动画显示等待过程，确保组件在延迟期间保持激活状态
     /// </summary>
     static IEnumerator 延迟刷新家族显示判断(家族显示判断 家族显示判断组件, float 延迟秒数)
     {
-        yield return new WaitForSeconds(延迟秒数);
-        if (家族显示判断组件 != null)
+        Debug.Log($"准备等待{延迟秒数}秒后刷新家族显示判断");
+        
+        // 显示加载动画，让用户知道正在处理
+        if (玩家数据管理.实例 != null && 玩家数据管理.实例.加载动画组件 != null)
         {
+            玩家数据管理.实例.加载动画组件.开始加载动画(延迟秒数, "正在更新家族信息...");
+        }
+        
+        // 等待指定时间
+        yield return new WaitForSeconds(延迟秒数);
+        
+        Debug.Log($"{延迟秒数}秒等待完成，准备刷新家族显示判断");
+        
+        // 确保组件和GameObject都存在且激活
+        if (家族显示判断组件 != null && 家族显示判断组件.gameObject != null)
+        {
+            // 如果GameObject未激活，尝试激活它
+            if (!家族显示判断组件.gameObject.activeInHierarchy)
+            {
+                Debug.LogWarning("家族显示判断GameObject未激活，尝试激活");
+                家族显示判断组件.gameObject.SetActive(true);
+            }
+            
+            Debug.Log("开始刷新家族显示判断");
             家族显示判断组件.刷新显示();
+        }
+        else
+        {
+            Debug.LogError("家族显示判断组件为null或GameObject为null，无法刷新！");
         }
     }
 

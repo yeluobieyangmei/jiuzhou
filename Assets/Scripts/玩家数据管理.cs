@@ -22,7 +22,7 @@ public class 玩家数据管理 : MonoBehaviour
 
     // 加载动画相关
     private GameObject 加载动画对象;
-    private 加载动画 加载动画组件;
+    public 加载动画 加载动画组件 { get; private set; }
 
     private void Awake()
     {
