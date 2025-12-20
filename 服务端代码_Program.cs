@@ -293,7 +293,7 @@ app.MapPost("/api/getPlayer", async ([FromBody] GetPlayerRequest 请求) =>
         string sql = @"
             SELECT 
                 p.id, p.name, p.gender, p.level, p.title_name, p.office,
-                p.copper_money, p.gold, p.country_id, p.clan_id,
+                p.copper_money, p.gold, p.country_id, p.clan_id, p.clan_contribution,
                 pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate,
                 c.id as country_id_full, c.name as country_name, c.code as country_code,
                 cl.id as clan_id_full, cl.name as clan_name
@@ -313,9 +313,9 @@ app.MapPost("/api/getPlayer", async ([FromBody] GetPlayerRequest 请求) =>
         {
             // 玩家存在，构建返回数据
             // SQL 查询顺序：p.id(0), p.name(1), p.gender(2), p.level(3), p.title_name(4), p.office(5),
-            // p.copper_money(6), p.gold(7), p.country_id(8), p.clan_id(9),
-            // pa.max_hp(10), pa.current_hp(11), pa.attack(12), pa.defense(13), pa.crit_rate(14),
-            // c.id(15), c.name(16), c.code(17), cl.id(18), cl.name(19)
+            // p.copper_money(6), p.gold(7), p.country_id(8), p.clan_id(9), p.clan_contribution(10),
+            // pa.max_hp(11), pa.current_hp(12), pa.attack(13), pa.defense(14), pa.crit_rate(15),
+            // c.id(16), c.name(17), c.code(18), cl.id(19), cl.name(20)
             var 玩家数据 = new PlayerData
             {
                 Id = reader.GetInt32(0),
@@ -328,24 +328,25 @@ app.MapPost("/api/getPlayer", async ([FromBody] GetPlayerRequest 请求) =>
                 Gold = reader.GetInt32(7),
                 CountryId = reader.IsDBNull(8) ? -1 : reader.GetInt32(8),  // Unity JsonUtility 不支持可空类型，用 -1 表示 null
                 ClanId = reader.IsDBNull(9) ? -1 : reader.GetInt32(9),    // Unity JsonUtility 不支持可空类型，用 -1 表示 null
+                ClanContribution = reader.GetInt32(10),  // 家族贡献值
                 Attributes = new PlayerAttributesData
                 {
-                    MaxHp = reader.GetInt32(10),
-                    CurrentHp = reader.GetInt32(11),
-                    Attack = reader.GetInt32(12),
-                    Defense = reader.GetInt32(13),
-                    CritRate = reader.GetFloat(14)
+                    MaxHp = reader.GetInt32(11),
+                    CurrentHp = reader.GetInt32(12),
+                    Attack = reader.GetInt32(13),
+                    Defense = reader.GetInt32(14),
+                    CritRate = reader.GetFloat(15)
                 },
-                Country = reader.IsDBNull(15) ? null : new CountryData
+                Country = reader.IsDBNull(16) ? null : new CountryData
                 {
-                    Id = reader.GetInt32(15),
-                    Name = reader.GetString(16),
-                    Code = reader.GetString(17)
+                    Id = reader.GetInt32(16),
+                    Name = reader.GetString(17),
+                    Code = reader.GetString(18)
                 },
-                Clan = reader.IsDBNull(18) ? null : new ClanData
+                Clan = reader.IsDBNull(19) ? null : new ClanData
                 {
-                    Id = reader.GetInt32(18),
-                    Name = reader.GetString(19)
+                    Id = reader.GetInt32(19),
+                    Name = reader.GetString(20)
                 }
             };
 
@@ -1326,10 +1327,11 @@ app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
                 await updateCountryCommand.ExecuteNonQueryAsync();
             }
 
-            // 4.2 将该家族所有成员的 clan_id 设置为 NULL，并记录族长解散家族的时间（用于冷却时间）
+            // 4.2 将该家族所有成员的 clan_id 设置为 NULL，清空家族贡献值，并记录族长解散家族的时间（用于冷却时间）
             using var updateMembersCommand = new MySqlCommand(
                 @"UPDATE players 
                   SET clan_id = NULL,
+                      clan_contribution = 0,
                       last_clan_disband_time = CASE WHEN id = @leader_id THEN NOW() ELSE last_clan_disband_time END
                   WHERE clan_id = @clan_id",
                 connection,
@@ -1432,11 +1434,12 @@ app.MapPost("/api/donateClan", async ([FromBody] DonateClanRequest 请求) =>
         using var transaction = await connection.BeginTransactionAsync();
         try
         {
-            // 4.1 扣除玩家铜钱并更新最后捐献日期
+            // 4.1 扣除玩家铜钱，更新最后捐献日期，增加家族贡献值（+10）
             using var updatePlayerCommand = new MySqlCommand(
                 @"UPDATE players 
                   SET copper_money = copper_money - @cost_copper, 
-                      last_donate_date = CURDATE() 
+                      last_donate_date = CURDATE(),
+                      clan_contribution = clan_contribution + 10
                   WHERE id = @player_id",
                 connection,
                 transaction
@@ -1445,16 +1448,32 @@ app.MapPost("/api/donateClan", async ([FromBody] DonateClanRequest 请求) =>
             updatePlayerCommand.Parameters.AddWithValue("@player_id", 玩家ID);
             await updatePlayerCommand.ExecuteNonQueryAsync();
 
-            // 4.2 增加家族资金（+100）和繁荣值（+10）
+            // 4.2 增加家族资金（+100）和繁荣值（+10），防止整数溢出
+            // 设置合理的上限值（避免使用int.MaxValue，因为游戏数值不需要那么大）
+            const int 家族资金上限 = 2000000000;  // 20亿（足够大的游戏数值上限）
+            const int 家族繁荣值上限 = 2000000000;  // 20亿（足够大的游戏数值上限）
+            const int 增加资金 = 100;
+            const int 增加繁荣值 = 10;
+            
             using var updateClanCommand = new MySqlCommand(
                 @"UPDATE clans 
-                  SET funds = funds + 100, 
-                      prosperity = prosperity + 10 
+                  SET funds = CASE 
+                      WHEN funds + @add_funds >= @max_funds THEN @max_funds 
+                      ELSE funds + @add_funds 
+                  END,
+                  prosperity = CASE 
+                      WHEN prosperity + @add_prosperity >= @max_prosperity THEN @max_prosperity 
+                      ELSE prosperity + @add_prosperity 
+                  END
                   WHERE id = @clan_id",
                 connection,
                 transaction
             );
             updateClanCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            updateClanCommand.Parameters.AddWithValue("@add_funds", 增加资金);
+            updateClanCommand.Parameters.AddWithValue("@add_prosperity", 增加繁荣值);
+            updateClanCommand.Parameters.AddWithValue("@max_funds", 家族资金上限);
+            updateClanCommand.Parameters.AddWithValue("@max_prosperity", 家族繁荣值上限);
             await updateClanCommand.ExecuteNonQueryAsync();
 
             // 提交事务
@@ -1710,10 +1729,11 @@ app.MapPost("/api/leaveClan", async ([FromBody] LeaveClanRequest 请求) =>
         using var transaction = await connection.BeginTransactionAsync();
         try
         {
-            // 3.1 更新玩家的家族ID为NULL，并记录退出家族时间
+            // 3.1 更新玩家的家族ID为NULL，清空家族贡献值，并记录退出家族时间
             using var updatePlayerCommand = new MySqlCommand(
                 @"UPDATE players 
                   SET clan_id = NULL, 
+                      clan_contribution = 0,
                       last_clan_leave_time = NOW() 
                   WHERE id = @player_id",
                 connection,
@@ -2074,6 +2094,7 @@ public class PlayerData
     public int Gold { get; set; }
     public int CountryId { get; set; } = -1;  // -1 表示没有国家/家族
     public int ClanId { get; set; } = -1;     // -1 表示没有国家/家族
+    public int ClanContribution { get; set; } = 0;  // 家族贡献值
     public PlayerAttributesData Attributes { get; set; } = new();
     public CountryData? Country { get; set; }
     public ClanData? Clan { get; set; }

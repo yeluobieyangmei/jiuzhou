@@ -259,6 +259,7 @@ public class 玩家数据管理 : MonoBehaviour
         当前玩家数据.称号名 = 服务端数据.titleName;
         当前玩家数据.铜钱 = 服务端数据.copperMoney;
         当前玩家数据.黄金 = 服务端数据.gold;
+        当前玩家数据.家族贡献值 = 服务端数据.clanContribution;
 
         // 官职（字符串转枚举）
         if (System.Enum.TryParse<玩家数据结构.官职枚举>(服务端数据.office, out var 官职值))
@@ -633,6 +634,7 @@ public class 服务端玩家数据
     public int gold;
     public int countryId; // Unity JsonUtility 不支持可空类型，用 -1 表示 null
     public int clanId;    // Unity JsonUtility 不支持可空类型，用 -1 表示 null
+    public int clanContribution;  // 家族贡献值
     public 服务端玩家属性 attributes;
     public 服务端国家数据 country;
     public 服务端家族数据 clan;

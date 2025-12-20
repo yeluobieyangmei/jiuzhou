@@ -31,7 +31,8 @@ public class 玩家列表显示 : MonoBehaviour
     {
         国家任命官员,
         国家不任命官员,
-        世界玩家排名查看
+        世界玩家排名查看,
+        家族玩家查看,
     }
 
     public enum 官员类型
@@ -41,6 +42,12 @@ public class 玩家列表显示 : MonoBehaviour
         太尉,
         御史大夫,
         金吾卫
+    }
+
+    public enum 家族官职类型
+    {
+        副族长,
+        精英
     }
 
     public void OnEnable()
