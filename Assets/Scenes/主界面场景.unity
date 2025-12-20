@@ -22638,7 +22638,7 @@ MonoBehaviour:
   m_OnClick:
     m_PersistentCalls:
       m_Calls:
-      - m_Target: {fileID: 0}
+      - m_Target: {fileID: 1008152147728738360}
         m_TargetAssemblyTypeName: "\u5BB6\u65CF\u4FE1\u606F\u663E\u793A, Assembly-CSharp"
         m_MethodName: "\u89E3\u6563\u5BB6\u65CF"
         m_Mode: 1
@@ -25081,6 +25081,16 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   "\u9000\u51FA\u5BB6\u65CF\u6309\u94AE": {fileID: 1008152147353391637}
   "\u89E3\u6563\u5BB6\u65CF\u6309\u94AE": {fileID: 1008152147533974360}
+  "\u5BB6\u65CF\u540D\u79F0\u6587\u672C": {fileID: 0}
+  "\u5BB6\u65CF\u65CF\u957F\u6587\u672C": {fileID: 0}
+  "\u6211\u7684\u804C\u4F4D\u6587\u672C": {fileID: 0}
+  "\u5BB6\u65CF\u7B49\u7EA7\u6587\u672C": {fileID: 0}
+  "\u5BB6\u65CF\u4EBA\u6570\u6587\u672C": {fileID: 0}
+  "\u5BB6\u65CF\u7E41\u8363\u6587\u672C": {fileID: 0}
+  "\u56FD\u5185\u6392\u540D\u6587\u672C": {fileID: 0}
+  "\u4E16\u754C\u6392\u540D\u6587\u672C": {fileID: 0}
+  "\u5BB6\u65CF\u8D44\u91D1\u6587\u672C": {fileID: 0}
+  "\u5BB6\u65CF\u663E\u793A\u5224\u65AD": {fileID: 0}
 --- !u!224 &1008152147747146119
 RectTransform:
   m_ObjectHideFlags: 0

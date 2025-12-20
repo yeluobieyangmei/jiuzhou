@@ -1113,6 +1113,150 @@ app.MapPost("/api/getClanInfo", async ([FromBody] GetClanInfoRequest 请求) =>
     }
 });
 
+// =================== 解散家族接口：POST /api/disbandClan ===================
+
+app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new DisbandClanResponse(false, "账号ID无效"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息，确认玩家存在且有家族
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, clan_id FROM players WHERE account_id = @account_id LIMIT 1",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new DisbandClanResponse(false, "玩家不存在或尚未创建角色"));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        int? 家族ID = playerReader.IsDBNull(1) ? null : playerReader.GetInt32(1);
+        playerReader.Close();
+
+        // 检查玩家是否有家族
+        if (!家族ID.HasValue || 家族ID.Value <= 0)
+        {
+            return Results.Ok(new DisbandClanResponse(false, "解散家族失败：玩家不属于任何家族"));
+        }
+
+        // 2. 查询家族信息，确认玩家是族长
+        using var clanCommand = new MySqlCommand(
+            "SELECT id, leader_id, country_id FROM clans WHERE id = @clan_id",
+            connection
+        );
+        clanCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+
+        using var clanReader = await clanCommand.ExecuteReaderAsync();
+        if (!await clanReader.ReadAsync())
+        {
+            return Results.Ok(new DisbandClanResponse(false, "解散家族失败：家族不存在"));
+        }
+
+        int 族长ID = clanReader.GetInt32(1);
+        int? 国家ID = clanReader.IsDBNull(2) ? null : clanReader.GetInt32(2);
+        clanReader.Close();
+
+        // 检查玩家是否是族长
+        if (玩家ID != 族长ID)
+        {
+            return Results.Ok(new DisbandClanResponse(false, "解散家族失败：只有族长可以解散家族"));
+        }
+
+        // 3. 检查该家族是否是执政家族，如果是，需要清除国家的国王和执政家族
+        int? 执政家族国家ID = null;
+        if (国家ID.HasValue)
+        {
+            using var rulingClanCommand = new MySqlCommand(
+                "SELECT id, ruling_clan_id, king_id FROM countries WHERE id = @country_id",
+                connection
+            );
+            rulingClanCommand.Parameters.AddWithValue("@country_id", 国家ID.Value);
+
+            using var rulingClanReader = await rulingClanCommand.ExecuteReaderAsync();
+            if (await rulingClanReader.ReadAsync())
+            {
+                int? 执政家族ID = rulingClanReader.IsDBNull(1) ? null : rulingClanReader.GetInt32(1);
+                if (执政家族ID.HasValue && 执政家族ID.Value == 家族ID.Value)
+                {
+                    执政家族国家ID = 国家ID.Value;
+                }
+            }
+            rulingClanReader.Close();
+        }
+
+        // 4. 开始事务，执行解散家族操作
+        using var transaction = await connection.BeginTransactionAsync();
+
+        try
+        {
+            // 4.1 如果是执政家族，清除国家的国王和执政家族
+            if (执政家族国家ID.HasValue)
+            {
+                using var updateCountryCommand = new MySqlCommand(
+                    "UPDATE countries SET king_id = NULL, ruling_clan_id = NULL WHERE id = @country_id",
+                    connection,
+                    transaction
+                );
+                updateCountryCommand.Parameters.AddWithValue("@country_id", 执政家族国家ID.Value);
+                await updateCountryCommand.ExecuteNonQueryAsync();
+            }
+
+            // 4.2 将该家族所有成员的 clan_id 设置为 NULL
+            using var updateMembersCommand = new MySqlCommand(
+                "UPDATE players SET clan_id = NULL WHERE clan_id = @clan_id",
+                connection,
+                transaction
+            );
+            updateMembersCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            await updateMembersCommand.ExecuteNonQueryAsync();
+
+            // 4.3 删除家族成员职位表中的所有记录（外键会自动处理，但显式删除更清晰）
+            using var deleteRolesCommand = new MySqlCommand(
+                "DELETE FROM clan_member_roles WHERE clan_id = @clan_id",
+                connection,
+                transaction
+            );
+            deleteRolesCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            await deleteRolesCommand.ExecuteNonQueryAsync();
+
+            // 4.4 删除家族记录（外键会自动处理相关数据）
+            using var deleteClanCommand = new MySqlCommand(
+                "DELETE FROM clans WHERE id = @clan_id",
+                connection,
+                transaction
+            );
+            deleteClanCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            await deleteClanCommand.ExecuteNonQueryAsync();
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new DisbandClanResponse(true, "家族解散成功"));
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new DisbandClanResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -1172,6 +1316,10 @@ public record GetAllPlayersResponse(bool Success, string Message, List<PlayerSum
 public record CreateClanRequest(int AccountId, string ClanName);
 
 public record CreateClanResponse(bool Success, string Message, int ClanId);
+
+public record DisbandClanRequest(int AccountId);
+
+public record DisbandClanResponse(bool Success, string Message);
 
 public record GetClanInfoRequest(int ClanId, int PlayerId);
 

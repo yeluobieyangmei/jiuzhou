@@ -25,6 +25,10 @@ public class 家族信息显示 : MonoBehaviour
     
     [Header("接口地址")]
     private string 获取家族信息地址 = "http://43.139.181.191:5000/api/getClanInfo";
+    private string 解散家族地址 = "http://43.139.181.191:5000/api/disbandClan";
+    
+    [Header("其他引用")]
+    public 家族显示判断 家族显示判断;
     
     //public 显示家族列表 显示家族列表;  显示家族列表尚未实现，此处先写补上格式 后续完善
     
@@ -156,13 +160,113 @@ public class 家族信息显示 : MonoBehaviour
 
     public void 解散家族()
     {
-        // 先不用管，后续完善
-        // 玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
-        // if (当前玩家 == null || 当前玩家.家族 == null)
-        // {
-        //     return;
-        // }
-        // TODO: 实现解散家族的网络请求
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null)
+        {
+            通用提示框.显示("无法获取当前玩家数据，无法解散家族");
+            return;
+        }
+
+        if (当前玩家.家族 == null || 当前玩家.家族.家族ID <= 0)
+        {
+            通用提示框.显示("当前玩家没有家族，无法解散家族");
+            return;
+        }
+
+        // 检查玩家是否是族长（客户端预检查）
+        // 注意：服务端会再次验证，这里只是提前提示
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            通用提示框.显示("解散家族失败：未找到账号ID，请先登录");
+            return;
+        }
+
+        // 发送解散家族请求
+        StartCoroutine(发送解散家族请求(accountId));
+    }
+
+    /// <summary>
+    /// 发送解散家族请求到服务器
+    /// </summary>
+    IEnumerator 发送解散家族请求(int accountId)
+    {
+        string json数据 = $"{{\"accountId\":{accountId}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(解散家族地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("解散家族出错: " + 请求.error);
+                // 可以在这里显示错误提示
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("解散家族响应: " + 返回文本);
+
+                解散家族响应 响应 = JsonUtility.FromJson<解散家族响应>(返回文本);
+                if (响应 != null)
+                {
+                    if (响应.success)
+                    {
+                        通用提示框.显示("家族解散成功！");
+
+                        // 刷新玩家数据（会更新家族信息，家族应该变为null）
+                        if (玩家数据管理.实例 != null)
+                        {
+                            玩家数据管理.实例.获取玩家数据(accountId);
+                        }
+
+                        // 关闭家族信息显示界面（因为已经没有家族了）
+                        gameObject.SetActive(false);
+
+                        // 刷新家族显示判断（会显示"无家族"界面）
+                        if (家族显示判断 != null)
+                        {
+                            // 延迟刷新，等待玩家数据更新完成
+                            if (玩家数据管理.实例 != null)
+                            {
+                                玩家数据管理.实例.StartCoroutine(延迟刷新家族显示判断(家族显示判断, 1f));
+                            }
+                            else
+                            {
+                                家族显示判断.刷新显示();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        通用提示框.显示("解散家族失败: " + 响应.message);
+                        // 可以在这里显示错误提示
+                    }
+                }
+                else
+                {
+                    通用提示框.显示("解散家族失败：解析响应失败");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 延迟刷新家族显示判断（等待玩家数据更新完成）
+    /// </summary>
+    static IEnumerator 延迟刷新家族显示判断(家族显示判断 家族显示判断组件, float 延迟秒数)
+    {
+        yield return new WaitForSeconds(延迟秒数);
+        if (家族显示判断组件 != null)
+        {
+            家族显示判断组件.刷新显示();
+        }
     }
 
     public void 退出家族()
@@ -213,4 +317,11 @@ public class 家族信息数据
     public int countryRank;
     public int worldRank;
     public string playerRole;
+}
+
+[System.Serializable]
+public class 解散家族响应
+{
+    public bool success;
+    public string message;
 }
