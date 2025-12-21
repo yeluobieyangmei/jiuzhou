@@ -27,6 +27,7 @@ namespace 玩家数据结构
         public string 称号名;
         public string 性别;
         public int 家族贡献值;  // 家族贡献值
+        public string 家族职位;  // 家族职位（族长、副族长、精英、成员）
         public 玩家属性 玩家属性 = new 玩家属性();
         public 国家信息库 国家;
         public 家族信息库 家族;

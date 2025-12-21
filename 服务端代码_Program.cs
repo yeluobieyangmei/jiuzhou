@@ -1789,6 +1789,178 @@ app.MapPost("/api/leaveClan", async ([FromBody] LeaveClanRequest 请求) =>
     }
 });
 
+// =================== 踢出家族成员接口：POST /api/kickClanMember ===================
+
+app.MapPost("/api/kickClanMember", async ([FromBody] KickClanMemberRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new KickClanMemberResponse(false, "账号ID无效"));
+        }
+
+        if (请求.TargetPlayerId <= 0)
+        {
+            return Results.Ok(new KickClanMemberResponse(false, "目标玩家ID无效"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 验证操作者是否是族长或副族长
+        using var operatorCommand = new MySqlCommand(
+            @"SELECT p.id, p.clan_id, c.leader_id
+              FROM players p
+              LEFT JOIN clans c ON p.clan_id = c.id
+              WHERE p.account_id = @account_id",
+            connection
+        );
+        operatorCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+        
+        using var operatorReader = await operatorCommand.ExecuteReaderAsync();
+        if (!await operatorReader.ReadAsync())
+        {
+            return Results.Ok(new KickClanMemberResponse(false, "操作者不存在"));
+        }
+        
+        int 操作者ID = operatorReader.GetInt32(0);
+        int? 操作者家族ID = operatorReader.IsDBNull(1) ? null : operatorReader.GetInt32(1);
+        int 族长ID = operatorReader.IsDBNull(2) ? -1 : operatorReader.GetInt32(2);
+        operatorReader.Close();
+        
+        if (!操作者家族ID.HasValue || 操作者家族ID.Value <= 0)
+        {
+            return Results.Ok(new KickClanMemberResponse(false, "操作者不属于任何家族"));
+        }
+
+        // 检查操作者是否是族长
+        bool 是族长 = 操作者ID == 族长ID;
+        
+        // 检查操作者是否是副族长
+        bool 是副族长 = false;
+        if (!是族长)
+        {
+            using var deputyCommand = new MySqlCommand(
+                "SELECT COUNT(*) FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id AND role = '副族长'",
+                connection
+            );
+            deputyCommand.Parameters.AddWithValue("@clan_id", 操作者家族ID.Value);
+            deputyCommand.Parameters.AddWithValue("@player_id", 操作者ID);
+            var deputyResult = await deputyCommand.ExecuteScalarAsync();
+            是副族长 = deputyResult != null && Convert.ToInt32(deputyResult) > 0;
+        }
+
+        if (!是族长 && !是副族长)
+        {
+            return Results.Ok(new KickClanMemberResponse(false, "只有族长或副族长可以踢出成员"));
+        }
+
+        // 2. 验证目标玩家是否属于该家族
+        using var targetCommand = new MySqlCommand(
+            "SELECT clan_id FROM players WHERE id = @player_id",
+            connection
+        );
+        targetCommand.Parameters.AddWithValue("@player_id", 请求.TargetPlayerId);
+        
+        var targetClanResult = await targetCommand.ExecuteScalarAsync();
+        if (targetClanResult == null || DBNull.Value.Equals(targetClanResult))
+        {
+            return Results.Ok(new KickClanMemberResponse(false, "目标玩家不存在"));
+        }
+        
+        int 目标玩家家族ID = Convert.ToInt32(targetClanResult);
+        if (目标玩家家族ID != 操作者家族ID.Value)
+        {
+            return Results.Ok(new KickClanMemberResponse(false, "目标玩家不属于该家族"));
+        }
+
+        // 3. 检查目标玩家是否是族长（族长不能踢自己，也不能被踢）
+        if (请求.TargetPlayerId == 族长ID)
+        {
+            if (请求.TargetPlayerId == 操作者ID)
+            {
+                return Results.Ok(new KickClanMemberResponse(false, "不能踢出自己"));
+            }
+            return Results.Ok(new KickClanMemberResponse(false, "不能踢出族长"));
+        }
+
+        // 4. 查询目标玩家的职位
+        using var targetRoleCommand = new MySqlCommand(
+            "SELECT role FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id",
+            connection
+        );
+        targetRoleCommand.Parameters.AddWithValue("@clan_id", 操作者家族ID.Value);
+        targetRoleCommand.Parameters.AddWithValue("@player_id", 请求.TargetPlayerId);
+        
+        var targetRoleResult = await targetRoleCommand.ExecuteScalarAsync();
+        string 目标玩家职位 = "";
+        if (targetRoleResult != null && !DBNull.Value.Equals(targetRoleResult))
+        {
+            目标玩家职位 = targetRoleResult.ToString() ?? "";
+        }
+
+        // 5. 权限检查：根据操作者职位决定可以踢出谁
+        if (是副族长)
+        {
+            // 副族长不能踢出族长和副族长
+            if (目标玩家职位 == "副族长")
+            {
+                return Results.Ok(new KickClanMemberResponse(false, "副族长不能踢出副族长"));
+            }
+            // 副族长可以踢出精英和成员
+        }
+        else if (是族长)
+        {
+            // 族长可以踢出除自己外的所有人（包括副族长、精英、成员）
+            // 已经在上面检查了不能踢自己（族长ID检查）
+            // 所以这里不需要额外检查
+        }
+
+        // 4. 开始事务：踢出目标玩家
+        using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            // 4.1 将目标玩家的 clan_id 设置为 NULL，清空家族贡献值
+            using var updatePlayerCommand = new MySqlCommand(
+                @"UPDATE players 
+                  SET clan_id = NULL,
+                      clan_contribution = 0
+                  WHERE id = @player_id",
+                connection,
+                transaction
+            );
+            updatePlayerCommand.Parameters.AddWithValue("@player_id", 请求.TargetPlayerId);
+            await updatePlayerCommand.ExecuteNonQueryAsync();
+
+            // 4.2 删除目标玩家在家族成员职位表中的记录
+            using var deleteRoleCommand = new MySqlCommand(
+                "DELETE FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id",
+                connection,
+                transaction
+            );
+            deleteRoleCommand.Parameters.AddWithValue("@clan_id", 操作者家族ID.Value);
+            deleteRoleCommand.Parameters.AddWithValue("@player_id", 请求.TargetPlayerId);
+            await deleteRoleCommand.ExecuteNonQueryAsync();
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new KickClanMemberResponse(true, "成功踢出家族成员"));
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new KickClanMemberResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
 // =================== 获取家族成员列表接口：POST /api/getClanMembers ===================
 
 app.MapPost("/api/getClanMembers", async ([FromBody] GetClanMembersRequest 请求) =>
@@ -1803,14 +1975,30 @@ app.MapPost("/api/getClanMembers", async ([FromBody] GetClanMembersRequest 请�
         using var connection = new MySqlConnection(数据库连接字符串);
         await connection.OpenAsync();
 
+        // 查询家族族长ID
+        int 族长ID = -1;
+        using var leaderCommand = new MySqlCommand(
+            "SELECT leader_id FROM clans WHERE id = @clan_id",
+            connection
+        );
+        leaderCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        var leaderResult = await leaderCommand.ExecuteScalarAsync();
+        if (leaderResult != null)
+        {
+            族长ID = Convert.ToInt32(leaderResult);
+        }
+
         // 查询指定家族的所有成员，按家族贡献值降序排序（相同贡献值按ID升序）
+        // 同时查询每个成员的职位信息
         string sql = @"
             SELECT 
                 p.id, p.name, p.gender, p.level, p.title_name, p.office,
                 p.copper_money, p.gold, p.clan_contribution,
-                pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate
+                pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate,
+                COALESCE(cmr.role, 'member') as clan_role
             FROM players p
             LEFT JOIN player_attributes pa ON p.id = pa.player_id
+            LEFT JOIN clan_member_roles cmr ON p.id = cmr.player_id AND cmr.clan_id = @clan_id
             WHERE p.clan_id = @clan_id
             ORDER BY p.clan_contribution DESC, p.id ASC";
 
@@ -1822,9 +2010,26 @@ app.MapPost("/api/getClanMembers", async ([FromBody] GetClanMembersRequest 请�
         var 成员列表 = new List<PlayerSummary>();
         while (await reader.ReadAsync())
         {
+            int 玩家ID = reader.GetInt32(0);
+            string 数据库职位 = reader.IsDBNull(14) ? "member" : reader.GetString(14);
+            
+            // 如果是族长，职位设为"族长"
+            string 玩家职位 = 玩家ID == 族长ID ? "族长" : 数据库职位;
+            
+            // 将数据库职位转换为中文
+            if (玩家职位 == "member")
+            {
+                玩家职位 = "成员";
+            }
+            else if (玩家职位 == "leader")
+            {
+                玩家职位 = "族长";
+            }
+            // "副族长"和"精英"保持不变
+            
             var 成员 = new PlayerSummary
             {
-                Id = reader.GetInt32(0),
+                Id = 玩家ID,
                 Name = reader.GetString(1),
                 Gender = reader.GetString(2),
                 Level = reader.GetInt32(3),
@@ -1833,6 +2038,7 @@ app.MapPost("/api/getClanMembers", async ([FromBody] GetClanMembersRequest 请�
                 CopperMoney = reader.GetInt32(6),
                 Gold = reader.GetInt32(7),
                 ClanContribution = reader.GetInt32(8),
+                ClanRole = 玩家职位,
                 Attributes = new PlayerAttributesData
                 {
                     MaxHp = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
@@ -2523,6 +2729,10 @@ public record GetClanMembersRequest(int ClanId);
 
 public record GetClanMembersResponse(bool Success, string Message, List<PlayerSummary> Data);
 
+public record KickClanMemberRequest(int AccountId, int TargetPlayerId);
+
+public record KickClanMemberResponse(bool Success, string Message);
+
 public record GetClanRolesRequest(int ClanId);
 
 public record GetClanRolesResponse(bool Success, string Message, ClanRolesData? Data);
@@ -2648,6 +2858,7 @@ public class PlayerSummary
     public int Gold { get; set; }
     public int CountryId { get; set; } = -1;  // -1 表示没有国家
     public int ClanContribution { get; set; } = 0;  // 家族贡献值
+    public string ClanRole { get; set; } = "成员";  // 家族职位（族长、副族长、精英、成员）
     public PlayerAttributesData Attributes { get; set; } = new();
     public string CountryName { get; set; } = "";
     public string CountryCode { get; set; } = "";

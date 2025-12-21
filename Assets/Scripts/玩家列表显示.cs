@@ -18,14 +18,17 @@ public class 玩家列表显示 : MonoBehaviour
     public 官员类型 当前官员类型;
     public Button 任命按钮;
     public Button 家族任命按钮;
+    public Button 踢出家族按钮;
     public 国家信息显示 国家信息显示;
     public Text UI标题;
     public 官职列表显示 官职列表显示;
+    public 家族信息显示 家族信息显示;
 
     [Header("接口地址")]
     private string 获取国家成员地址 = "http://43.139.181.191:5000/api/getCountryMembers";
     private string 获取所有玩家地址 = "http://43.139.181.191:5000/api/getAllPlayers";
     private string 获取家族成员地址 = "http://43.139.181.191:5000/api/getClanMembers";
+    private string 踢出家族成员地址 = "http://43.139.181.191:5000/api/kickClanMember";
 
     // 存储从服务器获取的玩家列表
     private List<玩家数据> 服务器玩家列表 = new List<玩家数据>();
@@ -292,6 +295,9 @@ public class 玩家列表显示 : MonoBehaviour
             玩家.玩家属性.暴击率 = 服务器数据.attributes.critRate;
         }
 
+        // 转换家族职位
+        玩家.家族职位 = !string.IsNullOrEmpty(服务器数据.clanRole) ? 服务器数据.clanRole : "成员";
+
         // 如果有国家信息，关联国家
         if (!string.IsNullOrEmpty(服务器数据.countryName) && 当前国家 != null && 
             当前国家.国家ID == 服务器数据.countryId)
@@ -332,26 +338,41 @@ public class 玩家列表显示 : MonoBehaviour
             return;
         }
         
-        // 设置家族任命按钮的显隐状态
+        // 设置家族任命按钮和踢出家族按钮的显隐状态
         if (当前显示类型 == 显示类型.家族玩家查看)
         {
             玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
-            if (当前玩家 != null && 当前玩家.家族 != null && 家族任命按钮 != null)
+            if (当前玩家 != null && 当前玩家.家族 != null)
             {
                 bool 是族长 = 当前玩家.家族.族长ID == 当前玩家.ID;
-                家族任命按钮.gameObject.SetActive(是族长);
-                Debug.Log($"家族任命按钮状态：显示类型={当前显示类型}，族长ID={当前玩家.家族.族长ID}，当前玩家ID={当前玩家.ID}，是族长={是族长}");
+                bool 是副族长 = 当前玩家.家族职位 == "副族长";
+                
+                // 家族任命按钮：只有族长可以显示
+                if (家族任命按钮 != null)
+                {
+                    家族任命按钮.gameObject.SetActive(是族长);
+                }
+                
+                // 踢出家族按钮：族长或副族长可以显示
+                if (踢出家族按钮 != null)
+                {
+                    踢出家族按钮.gameObject.SetActive(是族长 || 是副族长);
+                }
+                
+                Debug.Log($"家族按钮状态：显示类型={当前显示类型}，族长ID={当前玩家.家族.族长ID}，当前玩家ID={当前玩家.ID}，是族长={是族长}，是副族长={是副族长}");
             }
             else
             {
                 if (家族任命按钮 != null) 家族任命按钮.gameObject.SetActive(false);
-                Debug.LogWarning($"无法设置家族任命按钮：当前玩家={当前玩家 != null}，家族={当前玩家?.家族 != null}，按钮={家族任命按钮 != null}");
+                if (踢出家族按钮 != null) 踢出家族按钮.gameObject.SetActive(false);
+                Debug.LogWarning($"无法设置家族按钮：当前玩家={当前玩家 != null}，家族={当前玩家?.家族 != null}");
             }
         }
         else
         {
-            // 非家族玩家查看模式，隐藏家族任命按钮
+            // 非家族玩家查看模式，隐藏家族相关按钮
             if (家族任命按钮 != null) 家族任命按钮.gameObject.SetActive(false);
+            if (踢出家族按钮 != null) 踢出家族按钮.gameObject.SetActive(false);
         }
         
         // 设置国家任命按钮的显隐状态
@@ -397,11 +418,22 @@ public class 玩家列表显示 : MonoBehaviour
             }
             else if (当前显示类型 == 显示类型.家族玩家查看)
             {
-                // 家族成员：显示排名、等级、姓名和帮贡
+                // 家族成员：显示排名、职位、姓名和帮贡
                 克隆对象.transform.GetChild(0).GetComponent<Text>().text = $"{i + 1}.";
                 克隆对象.transform.GetChild(0).GetComponent<Text>().fontSize = 30;
                 克隆对象.transform.GetChild(0).GetComponent<Text>().color = new Color(0.94f, 0.97f, 0.21f);
-                克隆对象.transform.GetChild(1).GetComponent<Text>().text = $"{玩家.姓名} 帮贡:{玩家.家族贡献值}";
+                
+                // 根据职位显示文本：成员不显示职位，其他职位显示[职位]
+                string 显示文本;
+                if (玩家.家族职位 == "成员" || string.IsNullOrEmpty(玩家.家族职位))
+                {
+                    显示文本 = $"{玩家.姓名} 帮贡:{玩家.家族贡献值}";
+                }
+                else
+                {
+                    显示文本 = $"[{玩家.家族职位}]{玩家.姓名} 帮贡:{玩家.家族贡献值}";
+                }
+                克隆对象.transform.GetChild(1).GetComponent<Text>().text = 显示文本;
             }
             else
             {
@@ -486,7 +518,224 @@ public class 玩家列表显示 : MonoBehaviour
         官职列表显示.当前要任命的玩家 = 当前选中玩家;
         官职列表显示.gameObject.SetActive(true);
     }
+
+    /// <summary>
+    /// 点击踢出按钮
+    /// </summary>
+    public void 点击踢出按钮()
+    {
+        if (当前选中玩家 == null)
+        {
+            通用提示框.显示("请先选择一个玩家");
+            return;
+        }
+
+        // 检查当前显示类型
+        if (当前显示类型 != 显示类型.家族玩家查看)
+        {
+            通用提示框.显示("当前不在家族成员列表中");
+            return;
+        }
+
+        // 显示确认弹窗
+        通用说明弹窗.显示(
+            "踢出家族",
+            $"是否确认将{当前选中玩家.姓名}踢出家族？",
+            踢出家族
+        );
+    }
+
+    /// <summary>
+    /// 踢出家族
+    /// </summary>
+    private void 踢出家族()
+    {
+        if (当前选中玩家 == null)
+        {
+            通用提示框.显示("请先选择一个玩家");
+            return;
+        }
+
+        // 检查当前显示类型
+        if (当前显示类型 != 显示类型.家族玩家查看)
+        {
+            通用提示框.显示("当前不在家族成员列表中");
+            return;
+        }
+
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null || 当前玩家.家族 == null)
+        {
+            通用提示框.显示("无法获取当前玩家的家族信息");
+            return;
+        }
+
+        // 检查当前玩家的职位
+        bool 是族长 = 当前玩家.家族职位 == "族长";
+        bool 是副族长 = 当前玩家.家族职位 == "副族长";
+
+        if (!是族长 && !是副族长)
+        {
+            通用提示框.显示("只有族长或副族长可以踢出成员");
+            return;
+        }
+
+        // 检查目标玩家
+        if (当前选中玩家.ID == 当前玩家.ID)
+        {
+            通用提示框.显示("不能踢出自己");
+            return;
+        }
+
+        // 权限检查：根据当前玩家职位决定可以踢出谁
+        if (是副族长)
+        {
+            // 副族长不能踢出族长和副族长
+            if (当前选中玩家.家族职位 == "族长" || 当前选中玩家.家族职位 == "副族长")
+            {
+                通用提示框.显示("副族长不能踢出族长或副族长");
+                return;
+            }
+        }
+        else if (是族长)
+        {
+            // 族长可以踢出除自己外的所有人（包括副族长、精英、成员）
+            // 已经在上面检查了不能踢自己
+            if (当前选中玩家.家族职位 == "族长")
+            {
+                通用提示框.显示("不能踢出族长");
+                return;
+            }
+        }
+
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            通用提示框.显示("踢出失败：未找到账号ID，请先登录");
+            return;
+        }
+
+        // 显示加载动画（3秒）
+        if (玩家数据管理.实例 != null && 玩家数据管理.实例.加载动画组件 != null)
+        {
+            玩家数据管理.实例.加载动画组件.开始加载动画(3f, "踢出成员中...");
+        }
+
+        // 发送踢出请求
+        StartCoroutine(发送踢出家族成员请求(accountId, 当前选中玩家.ID));
+    }
+
+    /// <summary>
+    /// 发送踢出家族成员请求到服务器
+    /// </summary>
+    IEnumerator 发送踢出家族成员请求(int accountId, int targetPlayerId)
+    {
+        string json数据 = $"{{\"accountId\":{accountId},\"targetPlayerId\":{targetPlayerId}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(踢出家族成员地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("踢出家族成员出错: " + 请求.error);
+                通用提示框.显示("踢出失败：网络错误");
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("踢出家族成员响应: " + 返回文本);
+
+                踢出家族成员响应 响应 = JsonUtility.FromJson<踢出家族成员响应>(返回文本);
+                if (响应 != null)
+                {
+                    if (响应.success)
+                    {
+                        通用提示框.显示(响应.message);
+
+                        // 如果被踢出的是当前玩家自己，需要更新当前玩家数据
+                        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+                        if (当前玩家 != null && 当前玩家.ID == targetPlayerId)
+                        {
+                            // 被踢出的是自己，更新玩家数据（会清除家族信息）
+                            if (玩家数据管理.实例 != null)
+                            {
+                                玩家数据管理.实例.获取玩家数据(accountId);
+                            }
+                            
+                            // 关闭加载动画
+                            if (玩家数据管理.实例 != null && 玩家数据管理.实例.加载动画组件 != null)
+                            {
+                                玩家数据管理.实例.加载动画组件.关闭动画();
+                            }
+                            
+                            // 关闭玩家列表显示（因为自己已经被踢出，不再属于家族）
+                            this.gameObject.SetActive(false);
+                        }
+                        else
+                        {
+                            // 被踢出的是其他玩家，等待3秒后刷新家族成员列表和家族信息
+                            StartCoroutine(延迟刷新家族成员列表());
+                        }
+                    }
+                    else
+                    {
+                        // 失败时关闭加载动画
+                        if (玩家数据管理.实例 != null && 玩家数据管理.实例.加载动画组件 != null)
+                        {
+                            玩家数据管理.实例.加载动画组件.关闭动画();
+                        }
+                        通用提示框.显示(响应.message);
+                    }
+                }
+                else
+                {
+                    通用提示框.显示("踢出失败：解析响应失败");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 延迟刷新家族成员列表（3秒后）
+    /// </summary>
+    IEnumerator 延迟刷新家族成员列表()
+    {
+        yield return new WaitForSeconds(3f);
+
+        // 重新获取家族成员列表
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 != null && 当前玩家.家族 != null && 当前玩家.家族.家族ID > 0)
+        {
+            StartCoroutine(获取家族成员列表(当前玩家.家族.家族ID));
+        }
+        else
+        {
+            // 如果当前玩家没有家族了，刷新显示（会显示空列表）
+            刷新显示();
+        }
+
+        // 刷新家族信息显示（因为家族人数有变动）
+        if (家族信息显示 != null)
+        {
+            家族信息显示.刷新显示();
+        }
+
+        // 关闭加载动画（3秒后正好关闭）
+        if (玩家数据管理.实例 != null && 玩家数据管理.实例.加载动画组件 != null)
+        {
+            玩家数据管理.实例.加载动画组件.关闭动画();
+        }
+    }
 }
+
+// =================== 服务端返回的数据结构 ===================
 
 // =================== 服务端返回的数据结构 ===================
 
@@ -527,9 +776,17 @@ public class 玩家简要数据
     public int gold;
     public int countryId;
     public int clanContribution;  // 家族贡献值
+    public string clanRole;  // 家族职位（族长、副族长、精英、成员）
     public 玩家属性简要 attributes;
     public string countryName;
     public string countryCode;
+}
+
+[System.Serializable]
+public class 踢出家族成员响应
+{
+    public bool success;
+    public string message;
 }
 
 [System.Serializable]
