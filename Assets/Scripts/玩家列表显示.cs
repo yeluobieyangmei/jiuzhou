@@ -17,12 +17,14 @@ public class 玩家列表显示 : MonoBehaviour
     public 显示类型 当前显示类型;
     public 官员类型 当前官员类型;
     public Button 任命按钮;
+    public Button 家族任命按钮;
     public 国家信息显示 国家信息显示;
     public Text UI标题;
 
     [Header("接口地址")]
     private string 获取国家成员地址 = "http://43.139.181.191:5000/api/getCountryMembers";
     private string 获取所有玩家地址 = "http://43.139.181.191:5000/api/getAllPlayers";
+    private string 获取家族成员地址 = "http://43.139.181.191:5000/api/getClanMembers";
 
     // 存储从服务器获取的玩家列表
     private List<玩家数据> 服务器玩家列表 = new List<玩家数据>();
@@ -56,6 +58,19 @@ public class 玩家列表显示 : MonoBehaviour
         if (当前显示类型 == 显示类型.世界玩家排名查看)
         {
             StartCoroutine(获取所有玩家列表());
+        }
+        else if (当前显示类型 == 显示类型.家族玩家查看)
+        {
+            // 家族玩家查看：获取当前家族的成员列表
+            玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+            if (当前玩家 != null && 当前玩家.家族 != null && 当前玩家.家族.家族ID > 0)
+            {
+                StartCoroutine(获取家族成员列表(当前玩家.家族.家族ID));
+            }
+            else
+            {
+                Debug.LogWarning("当前玩家没有家族或家族ID无效，无法获取家族成员列表");
+            }
         }
         else
         {
@@ -126,6 +141,62 @@ public class 玩家列表显示 : MonoBehaviour
     }
 
     /// <summary>
+    /// 从服务器获取指定家族的成员列表
+    /// </summary>
+    IEnumerator 获取家族成员列表(int 家族ID)
+    {
+        string json数据 = $"{{\"clanId\":{家族ID}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(获取家族成员地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("获取家族成员列表出错: " + 请求.error);
+                yield break;
+            }
+
+            string 返回文本 = 请求.downloadHandler.text;
+            Debug.Log("获取家族成员列表响应: " + 返回文本);
+
+            获取家族成员响应 响应 = JsonUtility.FromJson<获取家族成员响应>(返回文本);
+            if (响应 == null || !响应.success || 响应.data == null)
+            {
+                Debug.LogError("获取家族成员列表失败：" + (响应 != null ? 响应.message : "解析失败"));
+                yield break;
+            }
+
+            // 将服务器数据转换为本地玩家数据
+            服务器玩家列表.Clear();
+            foreach (var item in 响应.data)
+            {
+                玩家数据 玩家 = 转换服务器数据为玩家数据(item);
+                服务器玩家列表.Add(玩家);
+            }
+
+            // 按家族贡献值降序排序（服务端已排序，但客户端再次确认）
+            服务器玩家列表.Sort((a, b) => 
+            {
+                if (a.家族贡献值 != b.家族贡献值)
+                {
+                    return b.家族贡献值.CompareTo(a.家族贡献值); // 贡献值降序
+                }
+                return a.ID.CompareTo(b.ID); // 相同贡献值按ID升序
+            });
+
+            // 刷新显示
+            刷新显示();
+        }
+    }
+
+    /// <summary>
     /// 从服务器获取所有玩家列表（用于世界排名）
     /// </summary>
     IEnumerator 获取所有玩家列表()
@@ -188,6 +259,7 @@ public class 玩家列表显示 : MonoBehaviour
         玩家.称号名 = 服务器数据.titleName;
         玩家.铜钱 = 服务器数据.copperMoney;
         玩家.黄金 = 服务器数据.gold;
+        玩家.家族贡献值 = 服务器数据.clanContribution;
 
         // 转换官职
         if (!string.IsNullOrEmpty(服务器数据.office))
@@ -235,6 +307,16 @@ public class 玩家列表显示 : MonoBehaviour
             }
         }
 
+        // 如果当前显示类型是家族玩家查看，关联当前玩家的家族
+        if (当前显示类型 == 显示类型.家族玩家查看)
+        {
+            玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+            if (当前玩家 != null && 当前玩家.家族 != null)
+            {
+                玩家.家族 = 当前玩家.家族;
+            }
+        }
+
         return 玩家;
     }
 
@@ -248,7 +330,30 @@ public class 玩家列表显示 : MonoBehaviour
             Debug.LogError("玩家列表显示：要克隆的对象或父对象未设置");
             return;
         }
-
+        
+        // 设置家族任命按钮的显隐状态
+        if (当前显示类型 == 显示类型.家族玩家查看)
+        {
+            玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+            if (当前玩家 != null && 当前玩家.家族 != null && 家族任命按钮 != null)
+            {
+                bool 是族长 = 当前玩家.家族.族长ID == 当前玩家.ID;
+                家族任命按钮.gameObject.SetActive(是族长);
+                Debug.Log($"家族任命按钮状态：显示类型={当前显示类型}，族长ID={当前玩家.家族.族长ID}，当前玩家ID={当前玩家.ID}，是族长={是族长}");
+            }
+            else
+            {
+                if (家族任命按钮 != null) 家族任命按钮.gameObject.SetActive(false);
+                Debug.LogWarning($"无法设置家族任命按钮：当前玩家={当前玩家 != null}，家族={当前玩家?.家族 != null}，按钮={家族任命按钮 != null}");
+            }
+        }
+        else
+        {
+            // 非家族玩家查看模式，隐藏家族任命按钮
+            if (家族任命按钮 != null) 家族任命按钮.gameObject.SetActive(false);
+        }
+        
+        // 设置国家任命按钮的显隐状态
         任命按钮.gameObject.SetActive(当前显示类型 == 显示类型.国家任命官员);
         要克隆的对象.gameObject.SetActive(false);
 
@@ -288,6 +393,14 @@ public class 玩家列表显示 : MonoBehaviour
                 克隆对象.transform.GetChild(0).GetComponent<Text>().fontSize = 30;
                 克隆对象.transform.GetChild(0).GetComponent<Text>().color = new Color(0.94f, 0.97f, 0.21f);
                 克隆对象.transform.GetChild(1).GetComponent<Text>().text = $"LV.{玩家.等级} {玩家.姓名} {国家信息}";
+            }
+            else if (当前显示类型 == 显示类型.家族玩家查看)
+            {
+                // 家族成员：显示排名、等级、姓名和帮贡
+                克隆对象.transform.GetChild(0).GetComponent<Text>().text = $"{i + 1}.";
+                克隆对象.transform.GetChild(0).GetComponent<Text>().fontSize = 30;
+                克隆对象.transform.GetChild(0).GetComponent<Text>().color = new Color(0.94f, 0.97f, 0.21f);
+                克隆对象.transform.GetChild(1).GetComponent<Text>().text = $"{玩家.姓名} 帮贡:{玩家.家族贡献值}";
             }
             else
             {
@@ -373,6 +486,14 @@ public class 获取所有玩家响应
 }
 
 [System.Serializable]
+public class 获取家族成员响应
+{
+    public bool success;
+    public string message;
+    public 玩家简要数据[] data;
+}
+
+[System.Serializable]
 public class 玩家简要数据
 {
     public int id;
@@ -384,6 +505,7 @@ public class 玩家简要数据
     public int copperMoney;
     public int gold;
     public int countryId;
+    public int clanContribution;  // 家族贡献值
     public 玩家属性简要 attributes;
     public string countryName;
     public string countryCode;

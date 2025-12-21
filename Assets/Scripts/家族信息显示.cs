@@ -35,9 +35,10 @@ public class 家族信息显示 : MonoBehaviour
     public GameObject 无家族界面;
 
     public 家族列表显示 家族列表显示;
-    
+    public 玩家列表显示 玩家列表显示;
+
     //public 显示家族列表 显示家族列表;  显示家族列表尚未实现，此处先写补上格式 后续完善
-    
+
     private void Start()
     {
         // 如果UI组件未在Inspector中赋值，尝试从子对象自动获取（兼容原有方式）
@@ -160,8 +161,20 @@ public class 家族信息显示 : MonoBehaviour
         if (世界排名文本 != null) 世界排名文本.text = $"世界排名：第{家族信息.worldRank}名";
         if (家族资金文本 != null) 家族资金文本.text = $"家族资金：{家族信息.funds}";
 
-        // 更新按钮显示（根据玩家职位）
+        // 更新当前玩家数据中的家族信息（特别是族长ID）
         玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 != null && 当前玩家.家族 != null && 当前玩家.家族.家族ID == 家族信息.id)
+        {
+            // 更新家族详细信息
+            当前玩家.家族.族长ID = 家族信息.leaderId;
+            当前玩家.家族.家族等级 = 家族信息.level;
+            当前玩家.家族.家族繁荣值 = 家族信息.prosperity;
+            当前玩家.家族.家族资金 = 家族信息.funds;
+            当前玩家.家族.国家排名 = 家族信息.countryRank;
+            当前玩家.家族.世界排名 = 家族信息.worldRank;
+        }
+
+        // 更新按钮显示（根据玩家职位）
         if (当前玩家 != null)
         {
             bool 是族长 = 家族信息.playerRole == "族长";
@@ -583,6 +596,13 @@ public class 家族信息显示 : MonoBehaviour
     {
         家族列表显示.当前显示类型 = 家族列表显示.显示类型.世界排名查看;
         家族列表显示.gameObject.SetActive(true);
+    }
+
+    public void 查看家族成员()
+    {
+        玩家列表显示.当前显示类型 = 玩家列表显示.显示类型.家族玩家查看;
+        玩家列表显示.UI标题.text = "家族成员";
+        玩家列表显示.gameObject.SetActive(true);
     }
 }
 

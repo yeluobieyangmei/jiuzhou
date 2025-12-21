@@ -800,7 +800,7 @@ app.MapPost("/api/getCountryMembers", async ([FromBody] GetCountryMembersRequest
         string sql = @"
             SELECT 
                 p.id, p.name, p.gender, p.level, p.title_name, p.office,
-                p.copper_money, p.gold,
+                p.copper_money, p.gold, p.clan_contribution,
                 pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate
             FROM players p
             LEFT JOIN player_attributes pa ON p.id = pa.player_id
@@ -825,13 +825,14 @@ app.MapPost("/api/getCountryMembers", async ([FromBody] GetCountryMembersRequest
                 Office = reader.GetString(5),
                 CopperMoney = reader.GetInt32(6),
                 Gold = reader.GetInt32(7),
+                ClanContribution = reader.GetInt32(8),
                 Attributes = new PlayerAttributesData
                 {
-                    MaxHp = reader.IsDBNull(8) ? 0 : reader.GetInt32(8),
-                    CurrentHp = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
-                    Attack = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
-                    Defense = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
-                    CritRate = reader.IsDBNull(12) ? 0f : reader.GetFloat(12)
+                    MaxHp = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                    CurrentHp = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                    Attack = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                    Defense = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+                    CritRate = reader.IsDBNull(13) ? 0f : reader.GetFloat(13)
                 }
             };
             成员列表.Add(成员);
@@ -858,7 +859,7 @@ app.MapGet("/api/getAllPlayers", async () =>
         string sql = @"
             SELECT 
                 p.id, p.name, p.gender, p.level, p.title_name, p.office,
-                p.copper_money, p.gold, p.country_id,
+                p.copper_money, p.gold, p.country_id, p.clan_contribution,
                 pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate,
                 c.name as country_name, c.code as country_code
             FROM players p
@@ -883,16 +884,17 @@ app.MapGet("/api/getAllPlayers", async () =>
                 CopperMoney = reader.GetInt32(6),
                 Gold = reader.GetInt32(7),
                 CountryId = reader.IsDBNull(8) ? -1 : reader.GetInt32(8),
+                ClanContribution = reader.GetInt32(9),
                 Attributes = new PlayerAttributesData
                 {
-                    MaxHp = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
-                    CurrentHp = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
-                    Attack = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
-                    Defense = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
-                    CritRate = reader.IsDBNull(13) ? 0f : reader.GetFloat(13)
+                    MaxHp = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                    CurrentHp = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                    Attack = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+                    Defense = reader.IsDBNull(13) ? 0 : reader.GetInt32(13),
+                    CritRate = reader.IsDBNull(14) ? 0f : reader.GetFloat(14)
                 },
-                CountryName = reader.IsDBNull(14) ? "" : reader.GetString(14),
-                CountryCode = reader.IsDBNull(15) ? "" : reader.GetString(15)
+                CountryName = reader.IsDBNull(15) ? "" : reader.GetString(15),
+                CountryCode = reader.IsDBNull(16) ? "" : reader.GetString(16)
             };
             玩家列表.Add(玩家);
         }
@@ -1770,6 +1772,70 @@ app.MapPost("/api/leaveClan", async ([FromBody] LeaveClanRequest 请求) =>
     }
 });
 
+// =================== 获取家族成员列表接口：POST /api/getClanMembers ===================
+
+app.MapPost("/api/getClanMembers", async ([FromBody] GetClanMembersRequest 请求) =>
+{
+    try
+    {
+        if (请求.ClanId <= 0)
+        {
+            return Results.Ok(new GetClanMembersResponse(false, "家族ID无效", new List<PlayerSummary>()));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询指定家族的所有成员，按家族贡献值降序排序（相同贡献值按ID升序）
+        string sql = @"
+            SELECT 
+                p.id, p.name, p.gender, p.level, p.title_name, p.office,
+                p.copper_money, p.gold, p.clan_contribution,
+                pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate
+            FROM players p
+            LEFT JOIN player_attributes pa ON p.id = pa.player_id
+            WHERE p.clan_id = @clan_id
+            ORDER BY p.clan_contribution DESC, p.id ASC";
+
+        using var command = new MySqlCommand(sql, connection);
+        command.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+
+        using var reader = await command.ExecuteReaderAsync();
+
+        var 成员列表 = new List<PlayerSummary>();
+        while (await reader.ReadAsync())
+        {
+            var 成员 = new PlayerSummary
+            {
+                Id = reader.GetInt32(0),
+                Name = reader.GetString(1),
+                Gender = reader.GetString(2),
+                Level = reader.GetInt32(3),
+                TitleName = reader.GetString(4),
+                Office = reader.GetString(5),
+                CopperMoney = reader.GetInt32(6),
+                Gold = reader.GetInt32(7),
+                ClanContribution = reader.GetInt32(8),
+                Attributes = new PlayerAttributesData
+                {
+                    MaxHp = reader.IsDBNull(9) ? 0 : reader.GetInt32(9),
+                    CurrentHp = reader.IsDBNull(10) ? 0 : reader.GetInt32(10),
+                    Attack = reader.IsDBNull(11) ? 0 : reader.GetInt32(11),
+                    Defense = reader.IsDBNull(12) ? 0 : reader.GetInt32(12),
+                    CritRate = reader.IsDBNull(13) ? 0f : reader.GetFloat(13)
+                }
+            };
+            成员列表.Add(成员);
+        }
+
+        return Results.Ok(new GetClanMembersResponse(true, "获取成功", 成员列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetClanMembersResponse(false, "服务器错误: " + ex.Message, new List<PlayerSummary>()));
+    }
+});
+
 // =================== 检查退出家族冷却时间接口：POST /api/checkLeaveClanCooldown ===================
 
 app.MapPost("/api/checkLeaveClanCooldown", async ([FromBody] CheckLeaveClanCooldownRequest 请求) =>
@@ -2051,6 +2117,10 @@ public record GetClansByCountryRequest(int CountryId);
 
 public record GetClansListResponse(bool Success, string Message, List<ClanSummary> Data);
 
+public record GetClanMembersRequest(int ClanId);
+
+public record GetClanMembersResponse(bool Success, string Message, List<PlayerSummary> Data);
+
 public class ClanSummary
 {
     public int Id { get; set; }
@@ -2145,6 +2215,7 @@ public class PlayerSummary
     public int CopperMoney { get; set; }
     public int Gold { get; set; }
     public int CountryId { get; set; } = -1;  // -1 表示没有国家
+    public int ClanContribution { get; set; } = 0;  // 家族贡献值
     public PlayerAttributesData Attributes { get; set; } = new();
     public string CountryName { get; set; } = "";
     public string CountryCode { get; set; } = "";
