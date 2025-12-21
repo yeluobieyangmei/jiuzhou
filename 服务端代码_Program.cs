@@ -1161,7 +1161,24 @@ app.MapPost("/api/getClanInfo", async ([FromBody] GetClanInfoRequest 请求) =>
                 var roleResult = await roleCommand.ExecuteScalarAsync();
                 if (roleResult != null)
                 {
-                    玩家职位 = roleResult.ToString() ?? "成员";
+                    string 数据库职位 = roleResult.ToString() ?? "member";
+                    // 将数据库中的职位转换为中文显示
+                    switch (数据库职位)
+                    {
+                        case "leader":
+                            玩家职位 = "族长";
+                            break;
+                        case "副族长":
+                            玩家职位 = "副族长";
+                            break;
+                        case "精英":
+                            玩家职位 = "精英";
+                            break;
+                        case "member":
+                        default:
+                            玩家职位 = "成员";
+                            break;
+                    }
                 }
             }
         }
@@ -2052,7 +2069,13 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             return Results.Ok(new AppointClanRoleResponse(false, "目标玩家不属于该家族"));
         }
 
-        // 3. 查询家族等级，验证职位数量限制
+        // 3. 检查目标玩家是否是族长（族长不能任命自己为其他职位）
+        if (请求.PlayerId == 族长ID)
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "族长不能任命自己为其他职位"));
+        }
+
+        // 4. 查询家族等级，验证职位数量限制
         using var levelCommand = new MySqlCommand(
             "SELECT level FROM clans WHERE id = @clan_id",
             connection
@@ -2090,25 +2113,31 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             }
         }
 
-        // 4. 查询当前该职位已任命的数量
-        using var countCommand = new MySqlCommand(
-            "SELECT COUNT(*) FROM clan_member_roles WHERE clan_id = @clan_id AND role = @role",
+        // 5. 查询当前该职位已任命的玩家列表（用于顶替）
+        using var currentRolePlayersCommand = new MySqlCommand(
+            "SELECT player_id FROM clan_member_roles WHERE clan_id = @clan_id AND role = @role ORDER BY player_id",
             connection
         );
-        countCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
-        countCommand.Parameters.AddWithValue("@role", 请求.Role);
+        currentRolePlayersCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        currentRolePlayersCommand.Parameters.AddWithValue("@role", 请求.Role);
         
-        var countResult = await countCommand.ExecuteScalarAsync();
-        int 当前数量 = countResult != null ? Convert.ToInt32(countResult) : 0;
-        
-        if (当前数量 >= 最大数量)
+        var 当前职位玩家列表 = new List<int>();
+        using var currentRolePlayersReader = await currentRolePlayersCommand.ExecuteReaderAsync();
+        while (await currentRolePlayersReader.ReadAsync())
         {
-            return Results.Ok(new AppointClanRoleResponse(false, $"{请求.Role}职位已满（最多{最大数量}个）"));
+            当前职位玩家列表.Add(currentRolePlayersReader.GetInt32(0));
+        }
+        currentRolePlayersReader.Close();
+        
+        // 6. 检查目标玩家是否已有该职位
+        if (当前职位玩家列表.Contains(请求.PlayerId))
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, $"该玩家已经是{请求.Role}"));
         }
 
-        // 5. 检查目标玩家是否已有职位
+        // 7. 检查目标玩家是否已有其他职位（副族长或精英）
         using var existingRoleCommand = new MySqlCommand(
-            "SELECT role FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id",
+            "SELECT role FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id AND role IN ('副族长', '精英')",
             connection
         );
         existingRoleCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
@@ -2118,17 +2147,54 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
         if (existingRoleResult != null && existingRoleResult != DBNull.Value)
         {
             string 现有职位 = existingRoleResult.ToString() ?? "";
-            if (现有职位 == "副族长" || 现有职位 == "精英")
-            {
-                return Results.Ok(new AppointClanRoleResponse(false, $"该玩家已经是{现有职位}，请先撤销其职位"));
-            }
+            // 如果目标玩家已有其他职位，需要先撤销（在事务中处理）
         }
 
-        // 6. 开始事务：更新或插入职位记录
+        // 8. 开始事务：处理职位任命和顶替
         using var transaction = await connection.BeginTransactionAsync();
         try
         {
-            // 如果玩家已有"成员"职位，先删除
+            // 8.1 如果目标玩家已有其他职位（副族长或精英），先删除
+            using var deleteOldRoleCommand = new MySqlCommand(
+                "DELETE FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id AND role IN ('副族长', '精英')",
+                connection,
+                transaction
+            );
+            deleteOldRoleCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+            deleteOldRoleCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+            await deleteOldRoleCommand.ExecuteNonQueryAsync();
+
+            // 8.2 如果该职位已满，需要顶替：将第一个玩家降为族员
+            if (当前职位玩家列表.Count >= 最大数量)
+            {
+                // 将第一个玩家降为族员
+                int 被顶替玩家ID = 当前职位玩家列表[0];
+                
+                // 删除原职位
+                using var deleteReplacedCommand = new MySqlCommand(
+                    "DELETE FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id AND role = @role",
+                    connection,
+                    transaction
+                );
+                deleteReplacedCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+                deleteReplacedCommand.Parameters.AddWithValue("@player_id", 被顶替玩家ID);
+                deleteReplacedCommand.Parameters.AddWithValue("@role", 请求.Role);
+                await deleteReplacedCommand.ExecuteNonQueryAsync();
+
+                // 将被顶替的玩家设置为族员（如果还没有记录，则插入；如果有记录，则更新）
+                using var setMemberCommand = new MySqlCommand(
+                    @"INSERT INTO clan_member_roles (clan_id, player_id, role) 
+                      VALUES (@clan_id, @player_id, 'member')
+                      ON DUPLICATE KEY UPDATE role = 'member'",
+                    connection,
+                    transaction
+                );
+                setMemberCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+                setMemberCommand.Parameters.AddWithValue("@player_id", 被顶替玩家ID);
+                await setMemberCommand.ExecuteNonQueryAsync();
+            }
+
+            // 8.3 删除目标玩家的"成员"职位（如果存在）
             using var deleteMemberCommand = new MySqlCommand(
                 "DELETE FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id AND role = 'member'",
                 connection,
@@ -2138,7 +2204,7 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             deleteMemberCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
             await deleteMemberCommand.ExecuteNonQueryAsync();
 
-            // 插入新职位（使用 INSERT ... ON DUPLICATE KEY UPDATE）
+            // 8.4 任命目标玩家为新职位
             using var insertCommand = new MySqlCommand(
                 @"INSERT INTO clan_member_roles (clan_id, player_id, role) 
                   VALUES (@clan_id, @player_id, @role)
@@ -2154,7 +2220,10 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             // 提交事务
             await transaction.CommitAsync();
 
-            return Results.Ok(new AppointClanRoleResponse(true, $"成功任命玩家为{请求.Role}"));
+            string 成功消息 = 当前职位玩家列表.Count >= 最大数量 
+                ? $"成功任命玩家为{请求.Role}（已顶替原职位玩家）" 
+                : $"成功任命玩家为{请求.Role}";
+            return Results.Ok(new AppointClanRoleResponse(true, 成功消息));
         }
         catch
         {
