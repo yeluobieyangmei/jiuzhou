@@ -20,6 +20,7 @@ public class 玩家列表显示 : MonoBehaviour
     public Button 家族任命按钮;
     public 国家信息显示 国家信息显示;
     public Text UI标题;
+    public 官职列表显示 官职列表显示;
 
     [Header("接口地址")]
     private string 获取国家成员地址 = "http://43.139.181.191:5000/api/getCountryMembers";
@@ -143,7 +144,7 @@ public class 玩家列表显示 : MonoBehaviour
     /// <summary>
     /// 从服务器获取指定家族的成员列表
     /// </summary>
-    IEnumerator 获取家族成员列表(int 家族ID)
+    public IEnumerator 获取家族成员列表(int 家族ID)
     {
         string json数据 = $"{{\"clanId\":{家族ID}}}";
         byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
@@ -464,6 +465,26 @@ public class 玩家列表显示 : MonoBehaviour
             国家信息显示.刷新显示();
         }
         Debug.Log($"已任命{当前选中玩家.姓名}为本国{当前官员类型}!");
+    }
+
+    public void 点击家族任命按钮()
+    {
+        if (当前选中玩家 == null)
+        {
+            通用提示框.显示("请先选择一个玩家");
+            return;
+        }
+
+        if (官职列表显示 == null)
+        {
+            Debug.LogError("官职列表显示组件未设置");
+            return;
+        }
+
+        // 设置显示类型并传递选中的玩家
+        官职列表显示.当前显示类型 = 官职列表显示.显示类型.家族任职;
+        官职列表显示.当前要任命的玩家 = 当前选中玩家;
+        官职列表显示.gameObject.SetActive(true);
     }
 }
 

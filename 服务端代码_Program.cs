@@ -1836,6 +1836,339 @@ app.MapPost("/api/getClanMembers", async ([FromBody] GetClanMembersRequest 请�
     }
 });
 
+// =================== 获取家族职位列表接口：POST /api/getClanRoles ===================
+
+app.MapPost("/api/getClanRoles", async ([FromBody] GetClanRolesRequest 请求) =>
+{
+    try
+    {
+        if (请求.ClanId <= 0)
+        {
+            return Results.Ok(new GetClanRolesResponse(false, "家族ID无效", null));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询家族等级
+        using var clanCommand = new MySqlCommand(
+            "SELECT level FROM clans WHERE id = @clan_id",
+            connection
+        );
+        clanCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        
+        var levelResult = await clanCommand.ExecuteScalarAsync();
+        if (levelResult == null)
+        {
+            return Results.Ok(new GetClanRolesResponse(false, "家族不存在", null));
+        }
+        
+        int 家族等级 = Convert.ToInt32(levelResult);
+
+        // 2. 根据家族等级计算职位数量
+        int 副族长数量 = 0;
+        int 精英数量 = 0;
+        
+        switch (家族等级)
+        {
+            case 1: 副族长数量 = 1; 精英数量 = 2; break;
+            case 2: 副族长数量 = 1; 精英数量 = 3; break;
+            case 3: 副族长数量 = 2; 精英数量 = 4; break;
+            case 4: 副族长数量 = 2; 精英数量 = 5; break;
+            case 5: 副族长数量 = 3; 精英数量 = 6; break;
+            default: 副族长数量 = 1; 精英数量 = 2; break;
+        }
+
+        // 3. 查询当前家族的职位信息
+        using var rolesCommand = new MySqlCommand(
+            @"SELECT cmr.role, cmr.player_id, p.name as player_name
+              FROM clan_member_roles cmr
+              LEFT JOIN players p ON cmr.player_id = p.id
+              WHERE cmr.clan_id = @clan_id AND cmr.role IN ('副族长', '精英')
+              ORDER BY cmr.role, cmr.player_id",
+            connection
+        );
+        rolesCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        
+        var 职位字典 = new Dictionary<string, List<ClanRoleInfo>>();
+        职位字典["副族长"] = new List<ClanRoleInfo>();
+        职位字典["精英"] = new List<ClanRoleInfo>();
+        
+        using var rolesReader = await rolesCommand.ExecuteReaderAsync();
+        while (await rolesReader.ReadAsync())
+        {
+            string 职位 = rolesReader.GetString(0);
+            int 玩家ID = rolesReader.GetInt32(1);
+            string 玩家姓名 = rolesReader.IsDBNull(2) ? "" : rolesReader.GetString(2);
+            
+            if (职位字典.ContainsKey(职位))
+            {
+                职位字典[职位].Add(new ClanRoleInfo
+                {
+                    PlayerId = 玩家ID,
+                    PlayerName = 玩家姓名
+                });
+            }
+        }
+        rolesReader.Close();
+
+        // 4. 构建职位列表
+        var 职位列表 = new List<ClanRoleSlot>();
+        
+        // 添加副族长职位
+        for (int i = 0; i < 副族长数量; i++)
+        {
+            if (i < 职位字典["副族长"].Count)
+            {
+                职位列表.Add(new ClanRoleSlot
+                {
+                    Role = "副族长",
+                    SlotIndex = i,
+                    PlayerId = 职位字典["副族长"][i].PlayerId,
+                    PlayerName = 职位字典["副族长"][i].PlayerName,
+                    IsOccupied = true
+                });
+            }
+            else
+            {
+                职位列表.Add(new ClanRoleSlot
+                {
+                    Role = "副族长",
+                    SlotIndex = i,
+                    PlayerId = 0,
+                    PlayerName = "无",
+                    IsOccupied = false
+                });
+            }
+        }
+        
+        // 添加精英职位
+        for (int i = 0; i < 精英数量; i++)
+        {
+            if (i < 职位字典["精英"].Count)
+            {
+                职位列表.Add(new ClanRoleSlot
+                {
+                    Role = "精英",
+                    SlotIndex = i,
+                    PlayerId = 职位字典["精英"][i].PlayerId,
+                    PlayerName = 职位字典["精英"][i].PlayerName,
+                    IsOccupied = true
+                });
+            }
+            else
+            {
+                职位列表.Add(new ClanRoleSlot
+                {
+                    Role = "精英",
+                    SlotIndex = i,
+                    PlayerId = 0,
+                    PlayerName = "无",
+                    IsOccupied = false
+                });
+            }
+        }
+
+        var 响应数据 = new ClanRolesData
+        {
+            ClanId = 请求.ClanId,
+            ClanLevel = 家族等级,
+            Roles = 职位列表
+        };
+
+        return Results.Ok(new GetClanRolesResponse(true, "获取成功", 响应数据));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetClanRolesResponse(false, "服务器错误: " + ex.Message, null));
+    }
+});
+
+// =================== 任命家族职位接口：POST /api/appointClanRole ===================
+
+app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "账号ID无效"));
+        }
+
+        if (请求.ClanId <= 0 || 请求.PlayerId <= 0)
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "家族ID或玩家ID无效"));
+        }
+
+        if (string.IsNullOrWhiteSpace(请求.Role) || (请求.Role != "副族长" && 请求.Role != "精英"))
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "职位类型无效，只能是'副族长'或'精英'"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 验证操作者是否是族长
+        using var leaderCommand = new MySqlCommand(
+            @"SELECT p.id, c.leader_id 
+              FROM players p
+              LEFT JOIN clans c ON p.clan_id = c.id
+              WHERE p.account_id = @account_id",
+            connection
+        );
+        leaderCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+        
+        using var leaderReader = await leaderCommand.ExecuteReaderAsync();
+        if (!await leaderReader.ReadAsync())
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "玩家不存在"));
+        }
+        
+        int 操作者ID = leaderReader.GetInt32(0);
+        int 族长ID = leaderReader.IsDBNull(1) ? -1 : leaderReader.GetInt32(1);
+        leaderReader.Close();
+        
+        if (族长ID != 操作者ID)
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "只有族长可以任命职位"));
+        }
+
+        // 2. 验证目标玩家是否属于该家族
+        using var playerCommand = new MySqlCommand(
+            "SELECT clan_id FROM players WHERE id = @player_id",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+        
+        var playerClanResult = await playerCommand.ExecuteScalarAsync();
+        if (playerClanResult == null || DBNull.Value.Equals(playerClanResult))
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "目标玩家不存在"));
+        }
+        
+        int 目标玩家家族ID = Convert.ToInt32(playerClanResult);
+        if (目标玩家家族ID != 请求.ClanId)
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "目标玩家不属于该家族"));
+        }
+
+        // 3. 查询家族等级，验证职位数量限制
+        using var levelCommand = new MySqlCommand(
+            "SELECT level FROM clans WHERE id = @clan_id",
+            connection
+        );
+        levelCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        
+        var levelResult = await levelCommand.ExecuteScalarAsync();
+        if (levelResult == null)
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, "家族不存在"));
+        }
+        
+        int 家族等级 = Convert.ToInt32(levelResult);
+        
+        // 计算该职位允许的最大数量
+        int 最大数量 = 0;
+        if (请求.Role == "副族长")
+        {
+            switch (家族等级)
+            {
+                case 1: case 2: 最大数量 = 1; break;
+                case 3: case 4: 最大数量 = 2; break;
+                case 5: 最大数量 = 3; break;
+            }
+        }
+        else if (请求.Role == "精英")
+        {
+            switch (家族等级)
+            {
+                case 1: 最大数量 = 2; break;
+                case 2: 最大数量 = 3; break;
+                case 3: 最大数量 = 4; break;
+                case 4: 最大数量 = 5; break;
+                case 5: 最大数量 = 6; break;
+            }
+        }
+
+        // 4. 查询当前该职位已任命的数量
+        using var countCommand = new MySqlCommand(
+            "SELECT COUNT(*) FROM clan_member_roles WHERE clan_id = @clan_id AND role = @role",
+            connection
+        );
+        countCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        countCommand.Parameters.AddWithValue("@role", 请求.Role);
+        
+        var countResult = await countCommand.ExecuteScalarAsync();
+        int 当前数量 = countResult != null ? Convert.ToInt32(countResult) : 0;
+        
+        if (当前数量 >= 最大数量)
+        {
+            return Results.Ok(new AppointClanRoleResponse(false, $"{请求.Role}职位已满（最多{最大数量}个）"));
+        }
+
+        // 5. 检查目标玩家是否已有职位
+        using var existingRoleCommand = new MySqlCommand(
+            "SELECT role FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id",
+            connection
+        );
+        existingRoleCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+        existingRoleCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+        
+        var existingRoleResult = await existingRoleCommand.ExecuteScalarAsync();
+        if (existingRoleResult != null && existingRoleResult != DBNull.Value)
+        {
+            string 现有职位 = existingRoleResult.ToString() ?? "";
+            if (现有职位 == "副族长" || 现有职位 == "精英")
+            {
+                return Results.Ok(new AppointClanRoleResponse(false, $"该玩家已经是{现有职位}，请先撤销其职位"));
+            }
+        }
+
+        // 6. 开始事务：更新或插入职位记录
+        using var transaction = await connection.BeginTransactionAsync();
+        try
+        {
+            // 如果玩家已有"成员"职位，先删除
+            using var deleteMemberCommand = new MySqlCommand(
+                "DELETE FROM clan_member_roles WHERE clan_id = @clan_id AND player_id = @player_id AND role = 'member'",
+                connection,
+                transaction
+            );
+            deleteMemberCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+            deleteMemberCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+            await deleteMemberCommand.ExecuteNonQueryAsync();
+
+            // 插入新职位（使用 INSERT ... ON DUPLICATE KEY UPDATE）
+            using var insertCommand = new MySqlCommand(
+                @"INSERT INTO clan_member_roles (clan_id, player_id, role) 
+                  VALUES (@clan_id, @player_id, @role)
+                  ON DUPLICATE KEY UPDATE role = @role",
+                connection,
+                transaction
+            );
+            insertCommand.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+            insertCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+            insertCommand.Parameters.AddWithValue("@role", 请求.Role);
+            await insertCommand.ExecuteNonQueryAsync();
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new AppointClanRoleResponse(true, $"成功任命玩家为{请求.Role}"));
+        }
+        catch
+        {
+            // 回滚事务
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new AppointClanRoleResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
 // =================== 检查退出家族冷却时间接口：POST /api/checkLeaveClanCooldown ===================
 
 app.MapPost("/api/checkLeaveClanCooldown", async ([FromBody] CheckLeaveClanCooldownRequest 请求) =>
@@ -2120,6 +2453,36 @@ public record GetClansListResponse(bool Success, string Message, List<ClanSummar
 public record GetClanMembersRequest(int ClanId);
 
 public record GetClanMembersResponse(bool Success, string Message, List<PlayerSummary> Data);
+
+public record GetClanRolesRequest(int ClanId);
+
+public record GetClanRolesResponse(bool Success, string Message, ClanRolesData? Data);
+
+public record AppointClanRoleRequest(int AccountId, int ClanId, int PlayerId, string Role);
+
+public record AppointClanRoleResponse(bool Success, string Message);
+
+public class ClanRolesData
+{
+    public int ClanId { get; set; }
+    public int ClanLevel { get; set; }
+    public List<ClanRoleSlot> Roles { get; set; } = new();
+}
+
+public class ClanRoleSlot
+{
+    public string Role { get; set; } = "";  // "副族长" 或 "精英"
+    public int SlotIndex { get; set; }  // 职位槽位索引（从0开始）
+    public int PlayerId { get; set; }  // 玩家ID，0表示未任命
+    public string PlayerName { get; set; } = "";  // 玩家姓名，"无"表示未任命
+    public bool IsOccupied { get; set; }  // 是否已任命
+}
+
+public class ClanRoleInfo
+{
+    public int PlayerId { get; set; }
+    public string PlayerName { get; set; } = "";
+}
 
 public class ClanSummary
 {
