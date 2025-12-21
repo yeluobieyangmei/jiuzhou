@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using MySql.Data.MySqlClient;
 using System.Security.Cryptography;
 using System.Text;
@@ -16,6 +17,12 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
         options.JsonSerializerOptions.Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping; // 支持中文字符
     });
+
+// 添加 SignalR 服务
+builder.Services.AddSignalR(options =>
+{
+    options.EnableDetailedErrors = true; // 开发阶段启用详细错误信息
+});
 
 // MySQL 数据库连接字符串（密码已填入）
 string 数据库连接字符串 = "Server=localhost;Database=jiuzhou;User=root;Password=!Cao1054675525;Charset=utf8mb4;";
@@ -73,6 +80,9 @@ var app = builder.Build();
 app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
+
+// 映射 SignalR Hub
+app.MapHub<GameHub>("/gameHub");
 
 // =================== 登录接口：POST /api/login ===================
 
@@ -1427,6 +1437,36 @@ app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
             // 提交事务
             await transaction.CommitAsync();
 
+            // 查询家族名称和族长姓名（用于事件消息）
+            string 家族名称 = "";
+            string 族长姓名 = "";
+            using var clanInfoCommand = new MySqlCommand(
+                @"SELECT c.name, p.name 
+                  FROM clans c
+                  LEFT JOIN players p ON c.leader_id = p.id
+                  WHERE c.id = @clan_id",
+                connection
+            );
+            clanInfoCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            using var clanInfoReader = await clanInfoCommand.ExecuteReaderAsync();
+            if (await clanInfoReader.ReadAsync())
+            {
+                家族名称 = clanInfoReader.IsDBNull(0) ? "" : clanInfoReader.GetString(0);
+                族长姓名 = clanInfoReader.IsDBNull(1) ? "" : clanInfoReader.GetString(1);
+            }
+            clanInfoReader.Close();
+
+            // 通过 SignalR 广播事件：家族解散（向所有家族成员广播）
+            var hubContext = app.Services.GetRequiredService<IHubContext<GameHub>>();
+            var disbandEvent = new ClanDisbandedEvent
+            {
+                ClanId = 家族ID.Value,
+                ClanName = 家族名称,
+                OperatorId = 玩家ID,
+                OperatorName = 族长姓名
+            };
+            await hubContext.Clients.Group($"clan_{家族ID.Value}").SendAsync("OnGameEvent", disbandEvent);
+
             return Results.Ok(new DisbandClanResponse(true, "家族解散成功"));
         }
         catch
@@ -1543,6 +1583,32 @@ app.MapPost("/api/donateClan", async ([FromBody] DonateClanRequest 请求) =>
 
             // 提交事务
             await transaction.CommitAsync();
+
+            // 查询玩家姓名（用于事件消息）
+            string 玩家姓名 = "";
+            using var playerNameCommand = new MySqlCommand(
+                "SELECT name FROM players WHERE id = @player_id",
+                connection
+            );
+            playerNameCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            var playerNameResult = await playerNameCommand.ExecuteScalarAsync();
+            if (playerNameResult != null)
+            {
+                玩家姓名 = playerNameResult.ToString() ?? "";
+            }
+
+            // 通过 SignalR 广播事件：家族捐献
+            var hubContext = app.Services.GetRequiredService<IHubContext<GameHub>>();
+            var donateEvent = new ClanDonatedEvent
+            {
+                ClanId = 家族ID.Value,
+                PlayerId = 玩家ID,
+                PlayerName = 玩家姓名,
+                DonationAmount = 捐献消耗铜钱,
+                FundsAdded = 100,
+                ProsperityAdded = 10
+            };
+            await hubContext.Clients.Group($"clan_{家族ID.Value}").SendAsync("OnGameEvent", donateEvent);
 
             return Results.Ok(new DonateClanResponse(true, "捐献成功！家族资金+100，繁荣值+10", false));
         }
@@ -1716,6 +1782,29 @@ app.MapPost("/api/joinClan", async ([FromBody] JoinClanRequest 请求) =>
             // 提交事务
             await transaction.CommitAsync();
 
+            // 查询玩家姓名（用于事件消息）
+            string 玩家姓名 = "";
+            using var playerNameCommand = new MySqlCommand(
+                "SELECT name FROM players WHERE id = @player_id",
+                connection
+            );
+            playerNameCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            var playerNameResult = await playerNameCommand.ExecuteScalarAsync();
+            if (playerNameResult != null)
+            {
+                玩家姓名 = playerNameResult.ToString() ?? "";
+            }
+
+            // 通过 SignalR 广播事件：成员加入家族
+            var hubContext = app.Services.GetRequiredService<IHubContext<GameHub>>();
+            var joinEvent = new ClanMemberJoinedEvent
+            {
+                ClanId = 家族ID,
+                PlayerId = 玩家ID,
+                PlayerName = 玩家姓名
+            };
+            await hubContext.Clients.Group($"clan_{家族ID}").SendAsync("OnGameEvent", joinEvent);
+
             return Results.Ok(new JoinClanResponse(true, "加入家族成功！"));
         }
         catch
@@ -1819,6 +1908,29 @@ app.MapPost("/api/leaveClan", async ([FromBody] LeaveClanRequest 请求) =>
 
             // 提交事务
             await transaction.CommitAsync();
+
+            // 查询玩家姓名（用于事件消息）
+            string 玩家姓名 = "";
+            using var playerNameCommand = new MySqlCommand(
+                "SELECT name FROM players WHERE id = @player_id",
+                connection
+            );
+            playerNameCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            var playerNameResult = await playerNameCommand.ExecuteScalarAsync();
+            if (playerNameResult != null)
+            {
+                玩家姓名 = playerNameResult.ToString() ?? "";
+            }
+
+            // 通过 SignalR 广播事件：成员离开家族
+            var hubContext = app.Services.GetRequiredService<IHubContext<GameHub>>();
+            var leaveEvent = new ClanMemberLeftEvent
+            {
+                ClanId = 家族ID.Value,
+                PlayerId = 玩家ID,
+                PlayerName = 玩家姓名
+            };
+            await hubContext.Clients.Group($"clan_{家族ID.Value}").SendAsync("OnGameEvent", leaveEvent);
 
             return Results.Ok(new LeaveClanResponse(true, "退出家族成功！"));
         }
@@ -1991,6 +2103,37 @@ app.MapPost("/api/kickClanMember", async ([FromBody] KickClanMemberRequest 请�
 
             // 提交事务
             await transaction.CommitAsync();
+
+            // 查询目标玩家和操作者的姓名（用于事件消息）
+            string 目标玩家姓名 = "";
+            string 操作者姓名 = "";
+            using var nameCommand = new MySqlCommand(
+                @"SELECT 
+                    (SELECT name FROM players WHERE id = @target_id) as target_name,
+                    (SELECT name FROM players WHERE id = @operator_id) as operator_name",
+                connection
+            );
+            nameCommand.Parameters.AddWithValue("@target_id", 请求.TargetPlayerId);
+            nameCommand.Parameters.AddWithValue("@operator_id", 操作者ID);
+            using var nameReader = await nameCommand.ExecuteReaderAsync();
+            if (await nameReader.ReadAsync())
+            {
+                目标玩家姓名 = nameReader.IsDBNull(0) ? "" : nameReader.GetString(0);
+                操作者姓名 = nameReader.IsDBNull(1) ? "" : nameReader.GetString(1);
+            }
+            nameReader.Close();
+
+            // 通过 SignalR 广播事件：成员被踢出家族
+            var hubContext = app.Services.GetRequiredService<IHubContext<GameHub>>();
+            var kickEvent = new ClanMemberKickedEvent
+            {
+                ClanId = 操作者家族ID.Value,
+                KickedPlayerId = 请求.TargetPlayerId,
+                KickedPlayerName = 目标玩家姓名,
+                OperatorId = 操作者ID,
+                OperatorName = 操作者姓名
+            };
+            await hubContext.Clients.Group($"clan_{操作者家族ID.Value}").SendAsync("OnGameEvent", kickEvent);
 
             return Results.Ok(new KickClanMemberResponse(true, "成功踢出家族成员"));
         }
@@ -2472,6 +2615,52 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             // 提交事务
             await transaction.CommitAsync();
 
+            // 查询玩家姓名（用于事件消息）
+            string 目标玩家姓名 = "";
+            string 操作者姓名 = "";
+            string 被顶替玩家姓名 = null;
+            int? 被顶替玩家ID = 当前职位玩家列表.Count >= 最大数量 ? 当前职位玩家列表[0] : null;
+            
+            using var nameCommand = new MySqlCommand(
+                @"SELECT 
+                    (SELECT name FROM players WHERE id = @target_id) as target_name,
+                    (SELECT name FROM players WHERE id = @operator_id) as operator_name" +
+                    (被顶替玩家ID.HasValue ? ", (SELECT name FROM players WHERE id = @replaced_id) as replaced_name" : ""),
+                connection
+            );
+            nameCommand.Parameters.AddWithValue("@target_id", 请求.PlayerId);
+            nameCommand.Parameters.AddWithValue("@operator_id", 操作者ID);
+            if (被顶替玩家ID.HasValue)
+            {
+                nameCommand.Parameters.AddWithValue("@replaced_id", 被顶替玩家ID.Value);
+            }
+            using var nameReader = await nameCommand.ExecuteReaderAsync();
+            if (await nameReader.ReadAsync())
+            {
+                目标玩家姓名 = nameReader.IsDBNull(0) ? "" : nameReader.GetString(0);
+                操作者姓名 = nameReader.IsDBNull(1) ? "" : nameReader.GetString(1);
+                if (被顶替玩家ID.HasValue && nameReader.FieldCount > 2)
+                {
+                    被顶替玩家姓名 = nameReader.IsDBNull(2) ? null : nameReader.GetString(2);
+                }
+            }
+            nameReader.Close();
+
+            // 通过 SignalR 广播事件：家族职位任命
+            var hubContext = app.Services.GetRequiredService<IHubContext<GameHub>>();
+            var appointEvent = new ClanRoleAppointedEvent
+            {
+                ClanId = 请求.ClanId,
+                PlayerId = 请求.PlayerId,
+                PlayerName = 目标玩家姓名,
+                Role = 请求.Role,
+                OperatorId = 操作者ID,
+                OperatorName = 操作者姓名,
+                ReplacedPlayerId = 被顶替玩家ID,
+                ReplacedPlayerName = 被顶替玩家姓名
+            };
+            await hubContext.Clients.Group($"clan_{请求.ClanId}").SendAsync("OnGameEvent", appointEvent);
+
             string 成功消息 = 当前职位玩家列表.Count >= 最大数量 
                 ? $"成功任命玩家为{请求.Role}（已顶替原职位玩家）" 
                 : $"成功任命玩家为{请求.Role}";
@@ -2908,5 +3097,151 @@ public class PlayerSummary
     public PlayerAttributesData Attributes { get; set; } = new();
     public string CountryName { get; set; } = "";
     public string CountryCode { get; set; } = "";
+}
+
+// =================== SignalR Hub 和事件消息 ===================
+
+/// <summary>
+/// SignalR Hub - 用于实时通信
+/// </summary>
+public class GameHub : Hub
+{
+    // 连接建立时调用
+    public override async Task OnConnectedAsync()
+    {
+        await base.OnConnectedAsync();
+        Console.WriteLine($"客户端已连接: {Context.ConnectionId}");
+    }
+
+    // 连接断开时调用
+    public override async Task OnDisconnectedAsync(Exception? exception)
+    {
+        await base.OnDisconnectedAsync(exception);
+        Console.WriteLine($"客户端已断开: {Context.ConnectionId}");
+    }
+
+    // 加入家族组（当玩家加入家族时调用）
+    public async Task JoinClanGroup(int clanId)
+    {
+        await Groups.AddToGroupAsync(Context.ConnectionId, $"clan_{clanId}");
+        Console.WriteLine($"客户端 {Context.ConnectionId} 加入家族组: clan_{clanId}");
+    }
+
+    // 离开家族组（当玩家离开家族时调用）
+    public async Task LeaveClanGroup(int clanId)
+    {
+        await Groups.RemoveFromGroupAsync(Context.ConnectionId, $"clan_{clanId}");
+        Console.WriteLine($"客户端 {Context.ConnectionId} 离开家族组: clan_{clanId}");
+    }
+}
+
+/// <summary>
+/// 游戏事件消息基类
+/// </summary>
+public class GameEventMessage
+{
+    public string EventType { get; set; } = "";
+    public DateTime Timestamp { get; set; } = DateTime.Now;
+}
+
+/// <summary>
+/// 成员被踢出家族事件
+/// </summary>
+public class ClanMemberKickedEvent : GameEventMessage
+{
+    public int ClanId { get; set; }
+    public int KickedPlayerId { get; set; }
+    public string KickedPlayerName { get; set; } = "";
+    public int OperatorId { get; set; }
+    public string OperatorName { get; set; } = "";
+
+    public ClanMemberKickedEvent()
+    {
+        EventType = "ClanMemberKicked";
+    }
+}
+
+/// <summary>
+/// 家族职位任命事件
+/// </summary>
+public class ClanRoleAppointedEvent : GameEventMessage
+{
+    public int ClanId { get; set; }
+    public int PlayerId { get; set; }
+    public string PlayerName { get; set; } = "";
+    public string Role { get; set; } = "";
+    public int OperatorId { get; set; }
+    public string OperatorName { get; set; } = "";
+    public int? ReplacedPlayerId { get; set; }  // 如果顶替了其他玩家，记录被顶替的玩家ID
+    public string? ReplacedPlayerName { get; set; }
+
+    public ClanRoleAppointedEvent()
+    {
+        EventType = "ClanRoleAppointed";
+    }
+}
+
+/// <summary>
+/// 家族解散事件
+/// </summary>
+public class ClanDisbandedEvent : GameEventMessage
+{
+    public int ClanId { get; set; }
+    public string ClanName { get; set; } = "";
+    public int OperatorId { get; set; }
+    public string OperatorName { get; set; } = "";
+
+    public ClanDisbandedEvent()
+    {
+        EventType = "ClanDisbanded";
+    }
+}
+
+/// <summary>
+/// 成员加入家族事件
+/// </summary>
+public class ClanMemberJoinedEvent : GameEventMessage
+{
+    public int ClanId { get; set; }
+    public int PlayerId { get; set; }
+    public string PlayerName { get; set; } = "";
+
+    public ClanMemberJoinedEvent()
+    {
+        EventType = "ClanMemberJoined";
+    }
+}
+
+/// <summary>
+/// 成员离开家族事件
+/// </summary>
+public class ClanMemberLeftEvent : GameEventMessage
+{
+    public int ClanId { get; set; }
+    public int PlayerId { get; set; }
+    public string PlayerName { get; set; } = "";
+
+    public ClanMemberLeftEvent()
+    {
+        EventType = "ClanMemberLeft";
+    }
+}
+
+/// <summary>
+/// 家族捐献事件
+/// </summary>
+public class ClanDonatedEvent : GameEventMessage
+{
+    public int ClanId { get; set; }
+    public int PlayerId { get; set; }
+    public string PlayerName { get; set; } = "";
+    public int DonationAmount { get; set; }
+    public int FundsAdded { get; set; }
+    public int ProsperityAdded { get; set; }
+
+    public ClanDonatedEvent()
+    {
+        EventType = "ClanDonated";
+    }
 }
 

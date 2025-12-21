@@ -391,6 +391,12 @@ public class 家族列表显示 : MonoBehaviour
                         if (玩家数据管理.实例 != null)
                         {
                             玩家数据管理.实例.获取玩家数据(accountId);
+                            
+                            // 加入家族组（SignalR）
+                            if (SignalR连接管理.实例 != null)
+                            {
+                                SignalR连接管理.实例.加入家族组(家族ID);
+                            }
                         }
 
                         // 关闭家族列表显示UI

@@ -139,6 +139,18 @@ public class 玩家数据管理 : MonoBehaviour
                         if (!是否已登录)
                         {
                             启动心跳();
+                            
+                            // 建立 SignalR 连接
+                            if (SignalR连接管理.实例 != null)
+                            {
+                                SignalR连接管理.实例.建立连接();
+                                
+                                // 如果玩家有家族，加入家族组
+                                if (当前玩家数据.家族 != null && 当前玩家数据.家族.家族ID > 0)
+                                {
+                                    SignalR连接管理.实例.加入家族组(当前玩家数据.家族.家族ID);
+                                }
+                            }
                         }
                         
                         if (创建界面 != null)
