@@ -221,6 +221,52 @@ app.MapPost("/api/logout", ([FromBody] LogoutRequest 请求) =>
     }
 });
 
+// =================== 心跳接口：POST /api/heartbeat ===================
+
+app.MapPost("/api/heartbeat", async ([FromBody] HeartbeatRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new HeartbeatResponse(false, "账号ID无效", -1));
+        }
+
+        // 更新在线账号的心跳时间
+        if (在线账号集合.ContainsKey(请求.AccountId))
+        {
+            在线账号集合[请求.AccountId] = DateTime.Now;
+            
+            // 查询玩家当前的家族ID（用于客户端检测家族变化）
+            int 家族ID = -1;
+            using var connection = new MySqlConnection(数据库连接字符串);
+            await connection.OpenAsync();
+            
+            using var clanCommand = new MySqlCommand(
+                "SELECT clan_id FROM players WHERE account_id = @account_id LIMIT 1",
+                connection
+            );
+            clanCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+            
+            var clanResult = await clanCommand.ExecuteScalarAsync();
+            if (clanResult != null && !DBNull.Value.Equals(clanResult))
+            {
+                家族ID = Convert.ToInt32(clanResult);
+            }
+            
+            return Results.Ok(new HeartbeatResponse(true, "心跳成功", 家族ID));
+        }
+        else
+        {
+            return Results.Ok(new HeartbeatResponse(false, "账号未在线", -1));
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new HeartbeatResponse(false, "服务器错误: " + ex.Message, -1));
+    }
+});
+
 // =================== 注册接口：POST /api/register ===================
 
 app.MapPost("/api/register", async ([FromBody] RegisterRequest 请求) =>
@@ -2695,7 +2741,7 @@ public record LogoutResponse(bool Success, string Message);
 
 public record HeartbeatRequest(int AccountId);
 
-public record HeartbeatResponse(bool Success, string Message);
+public record HeartbeatResponse(bool Success, string Message, int ClanId);
 
 public record GetClanInfoRequest(int ClanId, int PlayerId);
 
