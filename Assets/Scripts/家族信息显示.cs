@@ -177,9 +177,9 @@ public class 家族信息显示 : MonoBehaviour
             if (家族信息.countryRank > 0)
             {
                 国内排名文本.text = $"国内排名：第{家族信息.countryRank}名";
-            }
-            else
-            {
+        }
+        else
+        {
                 国内排名文本.text = "国内排名：无";
             }
         }
@@ -297,7 +297,7 @@ public class 家族信息显示 : MonoBehaviour
                         // 直接关闭家族信息显示界面，显示无家族界面
                         无家族界面.SetActive(true);
                         this.gameObject.SetActive(false);
-                    }
+        }
                     else
                     {
                         通用提示框.显示("解散家族失败: " + 响应.message);
@@ -320,8 +320,8 @@ public class 家族信息显示 : MonoBehaviour
         if (当前玩家 == null)
         {
             通用提示框.显示("无法获取当前玩家数据，无法退出家族");
-            return;
-        }
+                return;
+            }
 
         if (当前玩家.家族 == null || 当前玩家.家族.家族ID <= 0)
         {
@@ -333,8 +333,8 @@ public class 家族信息显示 : MonoBehaviour
         if (accountId <= 0)
         {
             通用提示框.显示("退出家族失败：未找到账号ID，请先登录");
-            return;
-        }
+        return;
+    }
 
         // 发送退出家族请求
         StartCoroutine(发送退出家族请求(accountId));
@@ -369,7 +369,7 @@ public class 家族信息显示 : MonoBehaviour
 
                 退出家族响应 响应 = JsonUtility.FromJson<退出家族响应>(返回文本);
                 if (响应 != null)
-                {
+    {
                     if (响应.success)
                     {
                         通用提示框.显示(响应.message);
@@ -403,9 +403,9 @@ public class 家族信息显示 : MonoBehaviour
                     {
                         通用提示框.显示(响应.message);
                     }
-                }
-                else
-                {
+        }
+        else
+        {
                     通用提示框.显示("退出家族失败：解析响应失败");
                 }
             }

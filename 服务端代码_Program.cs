@@ -6,8 +6,20 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Encodings.Web;
+using System.Net.WebSockets;
+using System.Collections.Concurrent;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// 配置日志：只保留启动信息到控制台，其他日志写入文件
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole(); // 保留控制台日志提供程序
+builder.Logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Information); // 设置为 Information 级别，只显示启动信息
+// 过滤掉详细日志，只保留 HostingLifetime 的启动信息
+builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", Microsoft.Extensions.Logging.LogLevel.Information);
+builder.Logging.AddFilter("Microsoft", Microsoft.Extensions.Logging.LogLevel.Warning); // Microsoft 命名空间的日志只显示 Warning 及以上
+builder.Logging.AddFilter("System", Microsoft.Extensions.Logging.LogLevel.Warning); // System 命名空间的日志只显示 Warning 及以上
+builder.Logging.AddFilter("", Microsoft.Extensions.Logging.LogLevel.Warning); // 其他所有日志只显示 Warning 及以上
 
 // 添加控制器支持，配置 JSON 选项（支持 camelCase 和 UTF-8 编码）
 builder.Services.AddControllers()
@@ -36,6 +48,17 @@ const int 锁定时长小时 = 1; // 锁定1小时
 // Key: 账号ID, Value: 最后心跳时间（DateTime）
 // 注意：服务器重启后此集合会清空，这是合理的
 var 在线账号集合 = new System.Collections.Concurrent.ConcurrentDictionary<int, DateTime>();
+
+// 玩家ID到WebSocket连接的映射（用于定向推送消息）
+// Key: 玩家ID, Value: WebSocket连接
+var 玩家连接映射 = new System.Collections.Concurrent.ConcurrentDictionary<int, WebSocket>();
+
+// 玩家最后发言时间记录（用于频率限制：5秒一次）
+// Key: 玩家ID, Value: 最后发言时间（DateTime）
+var 玩家最后发言时间 = new System.Collections.Concurrent.ConcurrentDictionary<int, DateTime>();
+
+// 消息队列（优先级队列：系统(0) > 家族(1) > 国家(2) > 世界(3)）
+var 消息队列 = new System.Collections.Concurrent.ConcurrentQueue<待处理消息>();
 
 // 心跳超时时间（秒）- 如果超过这个时间没有心跳，认为账号已离线
 const int 心跳超时秒数 = 120; // 2分钟无心跳则认为离线
@@ -70,16 +93,174 @@ var 清理超时账号任务 = Task.Run(async () =>
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[清理超时账号任务] 错误: {ex.Message}");
+            日志记录器.错误($"[清理超时账号任务] 错误: {ex.Message}");
+        }
+    }
+});
+
+// 启动消息队列处理后台任务
+var 消息处理任务 = Task.Run(async () =>
+{
+    while (true)
+    {
+        try
+        {
+            // 按优先级处理消息（先处理系统消息，再处理家族、国家、世界消息）
+            var 待处理消息列表 = new List<待处理消息>();
+            
+            // 从队列中取出所有消息
+            while (消息队列.TryDequeue(out var 消息))
+            {
+                待处理消息列表.Add(消息);
+            }
+            
+            // 按优先级排序：系统(0) > 家族(1) > 国家(2) > 世界(3)
+            if (待处理消息列表.Count > 0)
+            {
+                待处理消息列表.Sort((a, b) => a.优先级.CompareTo(b.优先级));
+                
+                foreach (var 消息 in 待处理消息列表)
+                {
+                    try
+                    {
+                        await 处理消息(消息, 数据库连接字符串, 玩家连接映射);
+                    }
+                    catch (Exception ex)
+                    {
+                        日志记录器.错误($"[消息处理任务] 处理消息失败: {ex.Message}");
+                    }
+                }
+            }
+            
+            await Task.Delay(100); // 每100ms处理一次
+        }
+        catch (Exception ex)
+        {
+            日志记录器.错误($"[消息处理任务] 错误: {ex.Message}");
+            await Task.Delay(1000); // 出错时等待1秒再继续
         }
     }
 });
 
 var app = builder.Build();
 
+// 启用 WebSocket 支持（用于自建简单 WebSocket 端点，向 Unity 客户端推送事件）
+app.UseWebSockets();
+
 app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
+
+// =================== 简单 WebSocket 端点：/ws ===================
+// 用途：维护所有在线 Unity WebSocket 连接，并向其广播家族相关事件（JSON 格式）
+
+app.Map("/ws", async context =>
+{
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = 400;
+        return;
+    }
+
+    // 从查询参数获取玩家ID（可选，如果客户端在连接时传递）
+    int? 玩家ID = null;
+    if (context.Request.Query.TryGetValue("playerId", out var playerIdStr) && int.TryParse(playerIdStr, out var parsedPlayerId))
+    {
+        玩家ID = parsedPlayerId;
+    }
+
+    using var webSocket = await context.WebSockets.AcceptWebSocketAsync();
+    日志记录器.信息($"[WebSocket] 客户端已连接{(玩家ID.HasValue ? $"，玩家ID: {玩家ID.Value}" : "")}");
+
+    // 将连接加入全局管理器
+    WebSocketConnectionManager.AddConnection(webSocket);
+
+    // 如果提供了玩家ID，记录到连接映射
+    if (玩家ID.HasValue)
+    {
+        玩家连接映射.AddOrUpdate(玩家ID.Value, webSocket, (key, oldValue) => webSocket);
+    }
+
+    var buffer = new byte[1024 * 4];
+    bool 已注册玩家ID = 玩家ID.HasValue;
+
+    try
+    {
+        while (webSocket.State == WebSocketState.Open)
+        {
+            var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                日志记录器.信息("[WebSocket] 客户端请求关闭连接");
+                await webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closing", CancellationToken.None);
+                break;
+            }
+            else if (result.MessageType == WebSocketMessageType.Text)
+            {
+                var msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                
+                // 处理玩家ID注册消息（格式：{"type":"registerPlayerId","playerId":123}）
+                if (!已注册玩家ID)
+                {
+                    try
+                    {
+                        var jsonDoc = JsonDocument.Parse(msg);
+                        if (jsonDoc.RootElement.TryGetProperty("type", out var typeProp) && 
+                            typeProp.GetString() == "registerPlayerId" &&
+                            jsonDoc.RootElement.TryGetProperty("playerId", out var playerIdProp))
+                        {
+                            int 注册玩家ID = playerIdProp.GetInt32();
+                            玩家连接映射.AddOrUpdate(注册玩家ID, webSocket, (key, oldValue) => webSocket);
+                            已注册玩家ID = true;
+                            日志记录器.信息($"[WebSocket] 玩家ID已注册: {注册玩家ID}");
+                            continue;
+                        }
+                    }
+                    catch
+                    {
+                        // 解析失败，忽略
+                    }
+                }
+                
+                日志记录器.信息($"[WebSocket] 收到客户端消息（忽略处理）：{msg}");
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        日志记录器.错误($"[WebSocket] 连接异常: {ex.Message}");
+    }
+    finally
+    {
+        // 从全局管理器中移除连接
+        WebSocketConnectionManager.RemoveConnection(webSocket);
+        
+        // 从玩家连接映射中移除
+        if (玩家ID.HasValue)
+        {
+            玩家连接映射.TryRemove(玩家ID.Value, out _);
+        }
+        else
+        {
+            // 如果没有玩家ID，尝试从映射中查找并移除
+            var 要移除的玩家ID列表 = new List<int>();
+            foreach (var kvp in 玩家连接映射)
+            {
+                if (kvp.Value == webSocket)
+                {
+                    要移除的玩家ID列表.Add(kvp.Key);
+                }
+            }
+            foreach (var pid in 要移除的玩家ID列表)
+            {
+                玩家连接映射.TryRemove(pid, out _);
+            }
+        }
+        
+        日志记录器.信息("[WebSocket] 客户端已断开并移除");
+    }
+});
 
 // 映射 SignalR Hub
 app.MapHub<GameHub>("/gameHub");
@@ -1467,6 +1648,9 @@ app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
             };
             await hubContext.Clients.Group($"clan_{家族ID.Value}").SendAsync("OnGameEvent", disbandEvent);
 
+            // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
+            await WebSocketConnectionManager.BroadcastAsync(disbandEvent);
+
             return Results.Ok(new DisbandClanResponse(true, "家族解散成功"));
         }
         catch
@@ -1609,6 +1793,9 @@ app.MapPost("/api/donateClan", async ([FromBody] DonateClanRequest 请求) =>
                 ProsperityAdded = 10
             };
             await hubContext.Clients.Group($"clan_{家族ID.Value}").SendAsync("OnGameEvent", donateEvent);
+
+            // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
+            await WebSocketConnectionManager.BroadcastAsync(donateEvent);
 
             return Results.Ok(new DonateClanResponse(true, "捐献成功！家族资金+100，繁荣值+10", false));
         }
@@ -1805,6 +1992,9 @@ app.MapPost("/api/joinClan", async ([FromBody] JoinClanRequest 请求) =>
             };
             await hubContext.Clients.Group($"clan_{家族ID}").SendAsync("OnGameEvent", joinEvent);
 
+            // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
+            await WebSocketConnectionManager.BroadcastAsync(joinEvent);
+
             return Results.Ok(new JoinClanResponse(true, "加入家族成功！"));
         }
         catch
@@ -1931,6 +2121,9 @@ app.MapPost("/api/leaveClan", async ([FromBody] LeaveClanRequest 请求) =>
                 PlayerName = 玩家姓名
             };
             await hubContext.Clients.Group($"clan_{家族ID.Value}").SendAsync("OnGameEvent", leaveEvent);
+
+            // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
+            await WebSocketConnectionManager.BroadcastAsync(leaveEvent);
 
             return Results.Ok(new LeaveClanResponse(true, "退出家族成功！"));
         }
@@ -2134,6 +2327,19 @@ app.MapPost("/api/kickClanMember", async ([FromBody] KickClanMemberRequest 请�
                 OperatorName = 操作者姓名
             };
             await hubContext.Clients.Group($"clan_{操作者家族ID.Value}").SendAsync("OnGameEvent", kickEvent);
+
+            // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
+            await WebSocketConnectionManager.BroadcastAsync(kickEvent);
+
+            // 发送系统消息给被踢出的玩家
+            var systemMessage = new 待处理消息
+            {
+                优先级 = 0, // 系统消息优先级最高
+                频道类型 = "system",
+                消息内容 = $"你被{操作者姓名}踢出了家族！",
+                目标玩家ID = 请求.TargetPlayerId
+            };
+            消息队列.Enqueue(systemMessage);
 
             return Results.Ok(new KickClanMemberResponse(true, "成功踢出家族成员"));
         }
@@ -2545,6 +2751,9 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             // 如果目标玩家已有其他职位，需要先撤销（在事务中处理）
         }
 
+        // 被顶替玩家ID（如果发生顶替，在事务中赋值）
+        int? 被顶替玩家ID = null;
+
         // 8. 开始事务：处理职位任命和顶替
         using var transaction = await connection.BeginTransactionAsync();
         try
@@ -2563,7 +2772,7 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             if (当前职位玩家列表.Count >= 最大数量)
             {
                 // 将第一个玩家降为族员
-                int 被顶替玩家ID = 当前职位玩家列表[0];
+                被顶替玩家ID = 当前职位玩家列表[0];
                 
                 // 删除原职位
                 using var deleteReplacedCommand = new MySqlCommand(
@@ -2618,8 +2827,7 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
             // 查询玩家姓名（用于事件消息）
             string 目标玩家姓名 = "";
             string 操作者姓名 = "";
-            string 被顶替玩家姓名 = null;
-            int? 被顶替玩家ID = 当前职位玩家列表.Count >= 最大数量 ? 当前职位玩家列表[0] : null;
+            string 被顶替玩家姓名 = "";
             
             using var nameCommand = new MySqlCommand(
                 @"SELECT 
@@ -2641,7 +2849,7 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
                 操作者姓名 = nameReader.IsDBNull(1) ? "" : nameReader.GetString(1);
                 if (被顶替玩家ID.HasValue && nameReader.FieldCount > 2)
                 {
-                    被顶替玩家姓名 = nameReader.IsDBNull(2) ? null : nameReader.GetString(2);
+                    被顶替玩家姓名 = nameReader.IsDBNull(2) ? "" : nameReader.GetString(2);
                 }
             }
             nameReader.Close();
@@ -2660,6 +2868,9 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
                 ReplacedPlayerName = 被顶替玩家姓名
             };
             await hubContext.Clients.Group($"clan_{请求.ClanId}").SendAsync("OnGameEvent", appointEvent);
+
+            // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
+            await WebSocketConnectionManager.BroadcastAsync(appointEvent);
 
             string 成功消息 = 当前职位玩家列表.Count >= 最大数量 
                 ? $"成功任命玩家为{请求.Role}（已顶替原职位玩家）" 
@@ -2860,6 +3071,582 @@ app.MapGet("/api/getAllClans", async () =>
     }
 });
 
+// =================== 聊天系统 API ===================
+
+// 发送世界消息接口：POST /api/sendWorldMessage
+app.MapPost("/api/sendWorldMessage", async ([FromBody] SendWorldMessageRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new SendMessageResponse(false, "账号ID无效"));
+        }
+
+        if (string.IsNullOrWhiteSpace(请求.Message))
+        {
+            return Results.Ok(new SendMessageResponse(false, "消息内容不能为空"));
+        }
+
+        // 消息长度限制：20字以内
+        if (请求.Message.Length > 20)
+        {
+            return Results.Ok(new SendMessageResponse(false, "消息长度不能超过20字"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, name, level, gold, country_id FROM players WHERE account_id = @account_id",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new SendMessageResponse(false, "玩家不存在"));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        string 玩家姓名 = playerReader.GetString(1);
+        int 玩家等级 = playerReader.GetInt32(2);
+        int 玩家黄金 = playerReader.GetInt32(3);
+        int? 国家ID = playerReader.IsDBNull(4) ? null : playerReader.GetInt32(4);
+        playerReader.Close();
+
+        // 2. 等级检查：世界消息需要≥25级
+        if (玩家等级 < 25)
+        {
+            return Results.Ok(new SendMessageResponse(false, "世界消息需要等级≥25级"));
+        }
+
+        // 3. 黄金检查：每次发送扣除5黄金
+        if (玩家黄金 < 5)
+        {
+            return Results.Ok(new SendMessageResponse(false, "黄金不足，发送世界消息需要5黄金"));
+        }
+
+        // 4. 频率限制：5秒一次
+        if (玩家最后发言时间.TryGetValue(玩家ID, out var 最后发言时间))
+        {
+            var 时间差 = (DateTime.Now - 最后发言时间).TotalSeconds;
+            if (时间差 < 5)
+            {
+                int 剩余秒数 = 5 - (int)时间差;
+                return Results.Ok(new SendMessageResponse(false, $"发送消息过于频繁，请{剩余秒数}秒后再试"));
+            }
+        }
+
+        // 5. 防刷检测：1分钟内相同消息≥5次则禁言1小时
+        string 消息哈希 = 计算SHA256(请求.Message);
+        using var checkSpamCommand = new MySqlCommand(
+            @"SELECT COUNT(*) FROM player_message_logs 
+              WHERE player_id = @player_id 
+              AND channel_type = 'world' 
+              AND message_hash = @message_hash 
+              AND created_at > DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
+            connection
+        );
+        checkSpamCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        checkSpamCommand.Parameters.AddWithValue("@message_hash", 消息哈希);
+        var spamCount = Convert.ToInt32(await checkSpamCommand.ExecuteScalarAsync());
+
+        if (spamCount >= 5)
+        {
+            // 添加禁言记录（1小时）
+            using var muteCommand = new MySqlCommand(
+                "INSERT INTO player_mute_records (player_id, mute_until, reason) VALUES (@player_id, DATE_ADD(NOW(), INTERVAL 1 HOUR), @reason)",
+                connection
+            );
+            muteCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            muteCommand.Parameters.AddWithValue("@reason", "刷屏行为：1分钟内发送相同消息超过5次");
+            await muteCommand.ExecuteNonQueryAsync();
+
+            // 发送禁言通知给玩家
+            var muteEvent = new SystemMessageEvent
+            {
+                Message = "你已被禁言1小时！",
+                MessageTime = DateTime.Now
+            };
+            await WebSocketConnectionManager.SendToPlayerAsync(玩家ID, muteEvent, 玩家连接映射);
+
+            return Results.Ok(new SendMessageResponse(false, "你已被禁言1小时"));
+        }
+
+        // 6. 检查是否在禁言期内
+        using var muteCheckCommand = new MySqlCommand(
+            "SELECT mute_until FROM player_mute_records WHERE player_id = @player_id AND mute_until > NOW() ORDER BY mute_until DESC LIMIT 1",
+            connection
+        );
+        muteCheckCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        var muteResult = await muteCheckCommand.ExecuteScalarAsync();
+        if (muteResult != null && !DBNull.Value.Equals(muteResult))
+        {
+            var muteUntil = Convert.ToDateTime(muteResult);
+            var 剩余时间 = muteUntil - DateTime.Now;
+            int 剩余分钟 = (int)剩余时间.TotalMinutes;
+            return Results.Ok(new SendMessageResponse(false, $"你已被禁言，剩余{剩余分钟}分钟"));
+        }
+
+        // 7. 扣除黄金
+        using var updateGoldCommand = new MySqlCommand(
+            "UPDATE players SET gold = gold - 5 WHERE id = @player_id",
+            connection
+        );
+        updateGoldCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        await updateGoldCommand.ExecuteNonQueryAsync();
+
+        // 8. 记录发言日志
+        using var logCommand = new MySqlCommand(
+            "INSERT INTO player_message_logs (player_id, channel_type, message_hash) VALUES (@player_id, 'world', @message_hash)",
+            connection
+        );
+        logCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        logCommand.Parameters.AddWithValue("@message_hash", 消息哈希);
+        await logCommand.ExecuteNonQueryAsync();
+
+        // 9. 更新最后发言时间
+        玩家最后发言时间.AddOrUpdate(玩家ID, DateTime.Now, (key, oldValue) => DateTime.Now);
+
+        // 10. 将消息加入队列（优先级3：世界消息）
+        消息队列.Enqueue(new 待处理消息
+        {
+            优先级 = 3,
+            频道类型 = "world",
+            玩家ID = 玩家ID,
+            玩家姓名 = 玩家姓名,
+            消息内容 = 请求.Message
+        });
+
+        return Results.Ok(new SendMessageResponse(true, "消息发送成功"));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new SendMessageResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
+// 发送国家消息接口：POST /api/sendCountryMessage
+app.MapPost("/api/sendCountryMessage", async ([FromBody] SendCountryMessageRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new SendMessageResponse(false, "账号ID无效"));
+        }
+
+        if (string.IsNullOrWhiteSpace(请求.Message))
+        {
+            return Results.Ok(new SendMessageResponse(false, "消息内容不能为空"));
+        }
+
+        // 消息长度限制：20字以内
+        if (请求.Message.Length > 20)
+        {
+            return Results.Ok(new SendMessageResponse(false, "消息长度不能超过20字"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, name, level, country_id FROM players WHERE account_id = @account_id",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new SendMessageResponse(false, "玩家不存在"));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        string 玩家姓名 = playerReader.GetString(1);
+        int 玩家等级 = playerReader.GetInt32(2);
+        int? 国家ID = playerReader.IsDBNull(3) ? null : playerReader.GetInt32(3);
+        playerReader.Close();
+
+        // 2. 检查玩家是否有国家
+        if (!国家ID.HasValue || 国家ID.Value <= 0)
+        {
+            return Results.Ok(new SendMessageResponse(false, "你还没有加入国家"));
+        }
+
+        // 3. 等级检查：国家消息需要≥15级
+        if (玩家等级 < 15)
+        {
+            return Results.Ok(new SendMessageResponse(false, "国家消息需要等级≥15级"));
+        }
+
+        // 4. 频率限制：5秒一次
+        if (玩家最后发言时间.TryGetValue(玩家ID, out var 最后发言时间))
+        {
+            var 时间差 = (DateTime.Now - 最后发言时间).TotalSeconds;
+            if (时间差 < 5)
+            {
+                int 剩余秒数 = 5 - (int)时间差;
+                return Results.Ok(new SendMessageResponse(false, $"发送消息过于频繁，请{剩余秒数}秒后再试"));
+            }
+        }
+
+        // 5. 防刷检测：1分钟内相同消息≥5次则禁言1小时
+        string 消息哈希 = 计算SHA256(请求.Message);
+        using var checkSpamCommand = new MySqlCommand(
+            @"SELECT COUNT(*) FROM player_message_logs 
+              WHERE player_id = @player_id 
+              AND channel_type = 'country' 
+              AND message_hash = @message_hash 
+              AND created_at > DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
+            connection
+        );
+        checkSpamCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        checkSpamCommand.Parameters.AddWithValue("@message_hash", 消息哈希);
+        var spamCount = Convert.ToInt32(await checkSpamCommand.ExecuteScalarAsync());
+
+        if (spamCount >= 5)
+        {
+            // 添加禁言记录（1小时）
+            using var muteCommand = new MySqlCommand(
+                "INSERT INTO player_mute_records (player_id, mute_until, reason) VALUES (@player_id, DATE_ADD(NOW(), INTERVAL 1 HOUR), @reason)",
+                connection
+            );
+            muteCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            muteCommand.Parameters.AddWithValue("@reason", "刷屏行为：1分钟内发送相同消息超过5次");
+            await muteCommand.ExecuteNonQueryAsync();
+
+            // 发送禁言通知给玩家
+            var muteEvent = new SystemMessageEvent
+            {
+                Message = "你已被禁言1小时！",
+                MessageTime = DateTime.Now
+            };
+            await WebSocketConnectionManager.SendToPlayerAsync(玩家ID, muteEvent, 玩家连接映射);
+
+            return Results.Ok(new SendMessageResponse(false, "你已被禁言1小时"));
+        }
+
+        // 6. 检查是否在禁言期内
+        using var muteCheckCommand = new MySqlCommand(
+            "SELECT mute_until FROM player_mute_records WHERE player_id = @player_id AND mute_until > NOW() ORDER BY mute_until DESC LIMIT 1",
+            connection
+        );
+        muteCheckCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        var muteResult = await muteCheckCommand.ExecuteScalarAsync();
+        if (muteResult != null && !DBNull.Value.Equals(muteResult))
+        {
+            var muteUntil = Convert.ToDateTime(muteResult);
+            var 剩余时间 = muteUntil - DateTime.Now;
+            int 剩余分钟 = (int)剩余时间.TotalMinutes;
+            return Results.Ok(new SendMessageResponse(false, $"你已被禁言，剩余{剩余分钟}分钟"));
+        }
+
+        // 7. 记录发言日志
+        using var logCommand = new MySqlCommand(
+            "INSERT INTO player_message_logs (player_id, channel_type, message_hash) VALUES (@player_id, 'country', @message_hash)",
+            connection
+        );
+        logCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        logCommand.Parameters.AddWithValue("@message_hash", 消息哈希);
+        await logCommand.ExecuteNonQueryAsync();
+
+        // 8. 更新最后发言时间
+        玩家最后发言时间.AddOrUpdate(玩家ID, DateTime.Now, (key, oldValue) => DateTime.Now);
+
+        // 9. 将消息加入队列（优先级2：国家消息）
+        消息队列.Enqueue(new 待处理消息
+        {
+            优先级 = 2,
+            频道类型 = "country",
+            玩家ID = 玩家ID,
+            玩家姓名 = 玩家姓名,
+            消息内容 = 请求.Message,
+            国家ID = 国家ID
+        });
+
+        return Results.Ok(new SendMessageResponse(true, "消息发送成功"));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new SendMessageResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
+// 发送家族消息接口：POST /api/sendClanMessage
+app.MapPost("/api/sendClanMessage", async ([FromBody] SendClanMessageRequest 请求) =>
+{
+    try
+    {
+        if (请求.AccountId <= 0)
+        {
+            return Results.Ok(new SendMessageResponse(false, "账号ID无效"));
+        }
+
+        if (string.IsNullOrWhiteSpace(请求.Message))
+        {
+            return Results.Ok(new SendMessageResponse(false, "消息内容不能为空"));
+        }
+
+        // 消息长度限制：20字以内
+        if (请求.Message.Length > 20)
+        {
+            return Results.Ok(new SendMessageResponse(false, "消息长度不能超过20字"));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 1. 查询玩家信息
+        using var playerCommand = new MySqlCommand(
+            "SELECT id, name, clan_id FROM players WHERE account_id = @account_id",
+            connection
+        );
+        playerCommand.Parameters.AddWithValue("@account_id", 请求.AccountId);
+
+        using var playerReader = await playerCommand.ExecuteReaderAsync();
+        if (!await playerReader.ReadAsync())
+        {
+            return Results.Ok(new SendMessageResponse(false, "玩家不存在"));
+        }
+
+        int 玩家ID = playerReader.GetInt32(0);
+        string 玩家姓名 = playerReader.GetString(1);
+        int? 家族ID = playerReader.IsDBNull(2) ? null : playerReader.GetInt32(2);
+        playerReader.Close();
+
+        // 2. 检查玩家是否有家族
+        if (!家族ID.HasValue || 家族ID.Value <= 0)
+        {
+            return Results.Ok(new SendMessageResponse(false, "你还没有加入家族"));
+        }
+
+        // 3. 频率限制：5秒一次
+        if (玩家最后发言时间.TryGetValue(玩家ID, out var 最后发言时间))
+        {
+            var 时间差 = (DateTime.Now - 最后发言时间).TotalSeconds;
+            if (时间差 < 5)
+            {
+                int 剩余秒数 = 5 - (int)时间差;
+                return Results.Ok(new SendMessageResponse(false, $"发送消息过于频繁，请{剩余秒数}秒后再试"));
+            }
+        }
+
+        // 4. 防刷检测：1分钟内相同消息≥5次则禁言1小时
+        string 消息哈希 = 计算SHA256(请求.Message);
+        using var checkSpamCommand = new MySqlCommand(
+            @"SELECT COUNT(*) FROM player_message_logs 
+              WHERE player_id = @player_id 
+              AND channel_type = 'clan' 
+              AND message_hash = @message_hash 
+              AND created_at > DATE_SUB(NOW(), INTERVAL 1 MINUTE)",
+            connection
+        );
+        checkSpamCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        checkSpamCommand.Parameters.AddWithValue("@message_hash", 消息哈希);
+        var spamCount = Convert.ToInt32(await checkSpamCommand.ExecuteScalarAsync());
+
+        if (spamCount >= 5)
+        {
+            // 添加禁言记录（1小时）
+            using var muteCommand = new MySqlCommand(
+                "INSERT INTO player_mute_records (player_id, mute_until, reason) VALUES (@player_id, DATE_ADD(NOW(), INTERVAL 1 HOUR), @reason)",
+                connection
+            );
+            muteCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            muteCommand.Parameters.AddWithValue("@reason", "刷屏行为：1分钟内发送相同消息超过5次");
+            await muteCommand.ExecuteNonQueryAsync();
+
+            // 发送禁言通知给玩家
+            var muteEvent = new SystemMessageEvent
+            {
+                Message = "你已被禁言1小时！",
+                MessageTime = DateTime.Now
+            };
+            await WebSocketConnectionManager.SendToPlayerAsync(玩家ID, muteEvent, 玩家连接映射);
+
+            return Results.Ok(new SendMessageResponse(false, "你已被禁言1小时"));
+        }
+
+        // 5. 检查是否在禁言期内
+        using var muteCheckCommand = new MySqlCommand(
+            "SELECT mute_until FROM player_mute_records WHERE player_id = @player_id AND mute_until > NOW() ORDER BY mute_until DESC LIMIT 1",
+            connection
+        );
+        muteCheckCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        var muteResult = await muteCheckCommand.ExecuteScalarAsync();
+        if (muteResult != null && !DBNull.Value.Equals(muteResult))
+        {
+            var muteUntil = Convert.ToDateTime(muteResult);
+            var 剩余时间 = muteUntil - DateTime.Now;
+            int 剩余分钟 = (int)剩余时间.TotalMinutes;
+            return Results.Ok(new SendMessageResponse(false, $"你已被禁言，剩余{剩余分钟}分钟"));
+        }
+
+        // 6. 记录发言日志
+        using var logCommand = new MySqlCommand(
+            "INSERT INTO player_message_logs (player_id, channel_type, message_hash) VALUES (@player_id, 'clan', @message_hash)",
+            connection
+        );
+        logCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+        logCommand.Parameters.AddWithValue("@message_hash", 消息哈希);
+        await logCommand.ExecuteNonQueryAsync();
+
+        // 7. 更新最后发言时间
+        玩家最后发言时间.AddOrUpdate(玩家ID, DateTime.Now, (key, oldValue) => DateTime.Now);
+
+        // 8. 将消息加入队列（优先级1：家族消息）
+        消息队列.Enqueue(new 待处理消息
+        {
+            优先级 = 1,
+            频道类型 = "clan",
+            玩家ID = 玩家ID,
+            玩家姓名 = 玩家姓名,
+            消息内容 = 请求.Message,
+            家族ID = 家族ID
+        });
+
+        return Results.Ok(new SendMessageResponse(true, "消息发送成功"));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new SendMessageResponse(false, "服务器错误: " + ex.Message));
+    }
+});
+
+// 获取世界消息历史接口：GET /api/getWorldMessages?limit=10
+app.MapGet("/api/getWorldMessages", async (HttpContext context) =>
+{
+    try
+    {
+        int limit = 10;
+        if (context.Request.Query.TryGetValue("limit", out var limitStr) && int.TryParse(limitStr, out var parsedLimit))
+        {
+            limit = parsedLimit;
+        }
+        if (limit <= 0 || limit > 20) limit = 10;
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        using var command = new MySqlCommand(
+            "SELECT player_id, player_name, message, created_at FROM world_messages ORDER BY created_at DESC LIMIT @limit",
+            connection
+        );
+        command.Parameters.AddWithValue("@limit", limit);
+
+        var 消息列表 = new List<ChatMessageData>();
+        using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            消息列表.Add(new ChatMessageData
+            {
+                PlayerId = reader.GetInt32(0),
+                PlayerName = reader.GetString(1),
+                Message = reader.GetString(2),
+                MessageTime = reader.GetDateTime(3)
+            });
+        }
+
+        return Results.Ok(new GetChatMessagesResponse(true, "获取成功", 消息列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetChatMessagesResponse(false, "服务器错误: " + ex.Message, new List<ChatMessageData>()));
+    }
+});
+
+// 获取国家消息历史接口：GET /api/getCountryMessages?limit=10
+app.MapGet("/api/getCountryMessages", async (HttpContext context) =>
+{
+    try
+    {
+        int limit = 10;
+        if (context.Request.Query.TryGetValue("limit", out var limitStr) && int.TryParse(limitStr, out var parsedLimit))
+        {
+            limit = parsedLimit;
+        }
+        if (limit <= 0 || limit > 20) limit = 10;
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        using var command = new MySqlCommand(
+            "SELECT player_id, player_name, message, created_at FROM country_messages ORDER BY created_at DESC LIMIT @limit",
+            connection
+        );
+        command.Parameters.AddWithValue("@limit", limit);
+
+        var 消息列表 = new List<ChatMessageData>();
+        using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            消息列表.Add(new ChatMessageData
+            {
+                PlayerId = reader.GetInt32(0),
+                PlayerName = reader.GetString(1),
+                Message = reader.GetString(2),
+                MessageTime = reader.GetDateTime(3)
+            });
+        }
+
+        return Results.Ok(new GetChatMessagesResponse(true, "获取成功", 消息列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetChatMessagesResponse(false, "服务器错误: " + ex.Message, new List<ChatMessageData>()));
+    }
+});
+
+// 获取家族消息历史接口：GET /api/getClanMessages?limit=10
+app.MapGet("/api/getClanMessages", async (HttpContext context) =>
+{
+    try
+    {
+        int limit = 10;
+        if (context.Request.Query.TryGetValue("limit", out var limitStr) && int.TryParse(limitStr, out var parsedLimit))
+        {
+            limit = parsedLimit;
+        }
+        if (limit <= 0 || limit > 20) limit = 10;
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        using var command = new MySqlCommand(
+            "SELECT player_id, player_name, message, created_at FROM clan_messages ORDER BY created_at DESC LIMIT @limit",
+            connection
+        );
+        command.Parameters.AddWithValue("@limit", limit);
+
+        var 消息列表 = new List<ChatMessageData>();
+        using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            消息列表.Add(new ChatMessageData
+            {
+                PlayerId = reader.GetInt32(0),
+                PlayerName = reader.GetString(1),
+                Message = reader.GetString(2),
+                MessageTime = reader.GetDateTime(3)
+            });
+        }
+
+        return Results.Ok(new GetChatMessagesResponse(true, "获取成功", 消息列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetChatMessagesResponse(false, "服务器错误: " + ex.Message, new List<ChatMessageData>()));
+    }
+});
+
 // =================== 计算 SHA256 哈希的辅助方法 ===================
 
 // 计算字符串的 SHA256 哈希（返回小写十六进制字符串）
@@ -2874,6 +3661,150 @@ static string 计算SHA256(string 输入)
         sb.Append(b.ToString("x2")); // 转成小写十六进制
     }
     return sb.ToString();
+}
+
+// =================== 消息处理函数 ===================
+
+// 处理消息（存储到数据库并广播）
+static async Task 处理消息(待处理消息 消息, string 数据库连接字符串, ConcurrentDictionary<int, WebSocket> 玩家连接映射)
+{
+    using var connection = new MySqlConnection(数据库连接字符串);
+    await connection.OpenAsync();
+
+    try
+    {
+        if (消息.频道类型 == "system")
+        {
+            // 系统消息：只发送给目标玩家，不存储
+            if (消息.目标玩家ID.HasValue)
+            {
+                var systemEvent = new SystemMessageEvent
+                {
+                    Message = 消息.消息内容,
+                    MessageTime = DateTime.Now
+                };
+                await WebSocketConnectionManager.SendToPlayerAsync(消息.目标玩家ID.Value, systemEvent, 玩家连接映射);
+            }
+        }
+        else if (消息.频道类型 == "world")
+        {
+            // 世界消息：存储到数据库（保留最新20条），然后广播给所有玩家
+            using var insertCommand = new MySqlCommand(
+                "INSERT INTO world_messages (player_id, player_name, message) VALUES (@player_id, @player_name, @message)",
+                connection
+            );
+            insertCommand.Parameters.AddWithValue("@player_id", 消息.玩家ID);
+            insertCommand.Parameters.AddWithValue("@player_name", 消息.玩家姓名);
+            insertCommand.Parameters.AddWithValue("@message", 消息.消息内容);
+            await insertCommand.ExecuteNonQueryAsync();
+
+            // 删除超过20条的消息
+            using var deleteCommand = new MySqlCommand(
+                @"DELETE FROM world_messages 
+                  WHERE id NOT IN (
+                      SELECT id FROM (
+                          SELECT id FROM world_messages ORDER BY created_at DESC LIMIT 20
+                      ) AS temp
+                  )",
+                connection
+            );
+            await deleteCommand.ExecuteNonQueryAsync();
+
+            // 广播给所有玩家
+            var chatEvent = new ChatMessageEvent
+            {
+                Channel = "world",
+                PlayerId = 消息.玩家ID,
+                PlayerName = 消息.玩家姓名,
+                Message = 消息.消息内容,
+                MessageTime = DateTime.Now
+            };
+            await WebSocketConnectionManager.BroadcastAsync(chatEvent);
+        }
+        else if (消息.频道类型 == "country")
+        {
+            // 国家消息：存储到数据库（保留最新20条），然后广播给所有玩家
+            if (消息.国家ID.HasValue)
+            {
+                using var insertCommand = new MySqlCommand(
+                    "INSERT INTO country_messages (country_id, player_id, player_name, message) VALUES (@country_id, @player_id, @player_name, @message)",
+                    connection
+                );
+                insertCommand.Parameters.AddWithValue("@country_id", 消息.国家ID.Value);
+                insertCommand.Parameters.AddWithValue("@player_id", 消息.玩家ID);
+                insertCommand.Parameters.AddWithValue("@player_name", 消息.玩家姓名);
+                insertCommand.Parameters.AddWithValue("@message", 消息.消息内容);
+                await insertCommand.ExecuteNonQueryAsync();
+
+                // 删除超过20条的消息
+                using var deleteCommand = new MySqlCommand(
+                    @"DELETE FROM country_messages 
+                      WHERE id NOT IN (
+                          SELECT id FROM (
+                              SELECT id FROM country_messages ORDER BY created_at DESC LIMIT 20
+                          ) AS temp
+                      )",
+                    connection
+                );
+                await deleteCommand.ExecuteNonQueryAsync();
+
+                // 广播给所有玩家
+                var chatEvent = new ChatMessageEvent
+                {
+                    Channel = "country",
+                    PlayerId = 消息.玩家ID,
+                    PlayerName = 消息.玩家姓名,
+                    Message = 消息.消息内容,
+                    MessageTime = DateTime.Now
+                };
+                await WebSocketConnectionManager.BroadcastAsync(chatEvent);
+            }
+        }
+        else if (消息.频道类型 == "clan")
+        {
+            // 家族消息：存储到数据库（保留最新20条），然后广播给所有玩家
+            if (消息.家族ID.HasValue)
+            {
+                using var insertCommand = new MySqlCommand(
+                    "INSERT INTO clan_messages (clan_id, player_id, player_name, message) VALUES (@clan_id, @player_id, @player_name, @message)",
+                    connection
+                );
+                insertCommand.Parameters.AddWithValue("@clan_id", 消息.家族ID.Value);
+                insertCommand.Parameters.AddWithValue("@player_id", 消息.玩家ID);
+                insertCommand.Parameters.AddWithValue("@player_name", 消息.玩家姓名);
+                insertCommand.Parameters.AddWithValue("@message", 消息.消息内容);
+                await insertCommand.ExecuteNonQueryAsync();
+
+                // 删除超过20条的消息
+                using var deleteCommand = new MySqlCommand(
+                    @"DELETE FROM clan_messages 
+                      WHERE id NOT IN (
+                          SELECT id FROM (
+                              SELECT id FROM clan_messages ORDER BY created_at DESC LIMIT 20
+                          ) AS temp
+                      )",
+                    connection
+                );
+                await deleteCommand.ExecuteNonQueryAsync();
+
+                // 广播给所有玩家
+                var chatEvent = new ChatMessageEvent
+                {
+                    Channel = "clan",
+                    PlayerId = 消息.玩家ID,
+                    PlayerName = 消息.玩家姓名,
+                    Message = 消息.消息内容,
+                    MessageTime = DateTime.Now
+                };
+                await WebSocketConnectionManager.BroadcastAsync(chatEvent);
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        日志记录器.错误($"[处理消息] 错误: {ex.Message}");
+        throw;
+    }
 }
 
 app.Run();
@@ -2967,6 +3898,25 @@ public record GetClanMembersResponse(bool Success, string Message, List<PlayerSu
 public record KickClanMemberRequest(int AccountId, int TargetPlayerId);
 
 public record KickClanMemberResponse(bool Success, string Message);
+
+// 聊天系统请求/响应类
+public record SendWorldMessageRequest(int AccountId, string Message);
+
+public record SendCountryMessageRequest(int AccountId, string Message);
+
+public record SendClanMessageRequest(int AccountId, string Message);
+
+public record SendMessageResponse(bool Success, string Message);
+
+public record GetChatMessagesResponse(bool Success, string Message, List<ChatMessageData> Data);
+
+public class ChatMessageData
+{
+    public int PlayerId { get; set; }
+    public string PlayerName { get; set; } = "";
+    public string Message { get; set; } = "";
+    public DateTime MessageTime { get; set; }
+}
 
 public record GetClanRolesRequest(int ClanId);
 
@@ -3110,29 +4060,165 @@ public class GameHub : Hub
     public override async Task OnConnectedAsync()
     {
         await base.OnConnectedAsync();
-        Console.WriteLine($"客户端已连接: {Context.ConnectionId}");
+        日志记录器.信息($"[SignalR] 客户端已连接: {Context.ConnectionId}");
     }
 
     // 连接断开时调用
     public override async Task OnDisconnectedAsync(Exception? exception)
     {
         await base.OnDisconnectedAsync(exception);
-        Console.WriteLine($"客户端已断开: {Context.ConnectionId}");
+        日志记录器.信息($"[SignalR] 客户端已断开: {Context.ConnectionId}");
     }
 
     // 加入家族组（当玩家加入家族时调用）
     public async Task JoinClanGroup(int clanId)
     {
         await Groups.AddToGroupAsync(Context.ConnectionId, $"clan_{clanId}");
-        Console.WriteLine($"客户端 {Context.ConnectionId} 加入家族组: clan_{clanId}");
+        日志记录器.信息($"[SignalR] 客户端 {Context.ConnectionId} 加入家族组: clan_{clanId}");
     }
 
     // 离开家族组（当玩家离开家族时调用）
     public async Task LeaveClanGroup(int clanId)
     {
         await Groups.RemoveFromGroupAsync(Context.ConnectionId, $"clan_{clanId}");
-        Console.WriteLine($"客户端 {Context.ConnectionId} 离开家族组: clan_{clanId}");
+        日志记录器.信息($"[SignalR] 客户端 {Context.ConnectionId} 离开家族组: clan_{clanId}");
     }
+}
+
+/// <summary>
+/// 简单的 WebSocket 连接管理器
+/// 用于维护所有在线 WebSocket 连接，并向其广播事件（JSON 格式）
+/// </summary>
+public static class WebSocketConnectionManager
+{
+    // 使用 ConcurrentDictionary 存储所有在线的 WebSocket 连接
+    // Key: WebSocket 实例, Value: 占位（未使用）
+    private static readonly ConcurrentDictionary<WebSocket, byte> 连接集合 = new();
+
+    // JSON 序列化选项（与全局 JSON 配置保持一致：camelCase + 支持中文）
+    private static readonly JsonSerializerOptions Json选项 = new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    /// <summary>
+    /// 新连接加入
+    /// </summary>
+    public static void AddConnection(WebSocket socket)
+    {
+        if (socket == null) return;
+        连接集合.TryAdd(socket, 0);
+    }
+
+    /// <summary>
+    /// 连接断开时移除
+    /// </summary>
+    public static void RemoveConnection(WebSocket socket)
+    {
+        if (socket == null) return;
+        连接集合.TryRemove(socket, out _);
+    }
+
+    /// <summary>
+    /// 向所有在线 WebSocket 客户端广播事件（如 ClanMemberKickedEvent 等）
+    /// </summary>
+    public static async Task BroadcastAsync(object eventData)
+    {
+        if (eventData == null) return;
+        if (连接集合.IsEmpty) return;
+
+        string json;
+        try
+        {
+            json = JsonSerializer.Serialize(eventData, Json选项);
+        }
+        catch (Exception ex)
+        {
+            日志记录器.错误($"[WebSocket] 序列化事件失败: {ex.Message}");
+            return;
+        }
+
+        var buffer = Encoding.UTF8.GetBytes(json);
+        var segment = new ArraySegment<byte>(buffer);
+
+        var 需要移除的连接 = new List<WebSocket>();
+
+        foreach (var kvp in 连接集合.Keys)
+        {
+            var socket = kvp;
+            if (socket.State != WebSocketState.Open)
+            {
+                需要移除的连接.Add(socket);
+                continue;
+            }
+
+            try
+            {
+                await socket.SendAsync(segment, WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                日志记录器.错误($"[WebSocket] 发送消息失败，移除连接: {ex.Message}");
+                需要移除的连接.Add(socket);
+            }
+        }
+
+        // 清理失效连接
+        foreach (var socket in 需要移除的连接)
+        {
+            RemoveConnection(socket);
+        }
+    }
+
+    /// <summary>
+    /// 向指定玩家ID推送消息（定向推送）
+    /// </summary>
+    public static async Task SendToPlayerAsync(int playerId, object eventData, ConcurrentDictionary<int, WebSocket> 玩家连接映射)
+    {
+        if (eventData == null) return;
+        if (!玩家连接映射.TryGetValue(playerId, out var socket)) return;
+        if (socket == null || socket.State != WebSocketState.Open) return;
+
+        string json;
+        try
+        {
+            json = JsonSerializer.Serialize(eventData, Json选项);
+        }
+        catch (Exception ex)
+        {
+            日志记录器.错误($"[WebSocket] 序列化事件失败: {ex.Message}");
+            return;
+        }
+
+        try
+        {
+            var buffer = Encoding.UTF8.GetBytes(json);
+            var segment = new ArraySegment<byte>(buffer);
+            await socket.SendAsync(segment, WebSocketMessageType.Text, true, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            日志记录器.错误($"[WebSocket] 向玩家{playerId}发送消息失败: {ex.Message}");
+            玩家连接映射.TryRemove(playerId, out _);
+        }
+    }
+}
+
+/// <summary>
+/// 待处理消息（用于消息队列）
+/// </summary>
+public class 待处理消息
+{
+    public int 优先级 { get; set; } // 系统(0) > 家族(1) > 国家(2) > 世界(3)
+    public string 频道类型 { get; set; } = ""; // "world", "country", "clan", "system"
+    public int 玩家ID { get; set; }
+    public string 玩家姓名 { get; set; } = "";
+    public string 消息内容 { get; set; } = "";
+    public int? 国家ID { get; set; }
+    public int? 家族ID { get; set; }
+    public int? 目标玩家ID { get; set; } // 系统消息的目标玩家ID
 }
 
 /// <summary>
@@ -3242,6 +4328,106 @@ public class ClanDonatedEvent : GameEventMessage
     public ClanDonatedEvent()
     {
         EventType = "ClanDonated";
+    }
+}
+
+/// <summary>
+/// 聊天消息事件
+/// </summary>
+public class ChatMessageEvent : GameEventMessage
+{
+    public string Channel { get; set; } = ""; // "world", "country", "clan"
+    public int PlayerId { get; set; }
+    public string PlayerName { get; set; } = "";
+    public string Message { get; set; } = "";
+    public DateTime MessageTime { get; set; } = DateTime.Now;
+
+    public ChatMessageEvent()
+    {
+        EventType = "ChatMessage";
+    }
+}
+
+/// <summary>
+/// 系统消息事件
+/// </summary>
+public class SystemMessageEvent : GameEventMessage
+{
+    public string Message { get; set; } = "";
+    public DateTime MessageTime { get; set; } = DateTime.Now;
+
+    public SystemMessageEvent()
+    {
+        EventType = "SystemMessage";
+    }
+}
+
+// =================== 日志记录器 ===================
+/// <summary>
+/// 简单的日志记录器，支持同时输出到控制台和文件
+/// </summary>
+public static class 日志记录器
+{
+    private static readonly object 日志锁 = new object();
+    private static readonly string 日志文件路径 = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Log.txt");
+    private const long 最大日志文件大小 = 10 * 1024 * 1024; // 10MB，超过此大小会清空文件重新开始
+
+    /// <summary>
+    /// 记录信息日志
+    /// </summary>
+    public static void 信息(string 消息)
+    {
+        写入日志("INFO", 消息);
+    }
+
+    /// <summary>
+    /// 记录警告日志
+    /// </summary>
+    public static void 警告(string 消息)
+    {
+        写入日志("WARN", 消息);
+    }
+
+    /// <summary>
+    /// 记录错误日志
+    /// </summary>
+    public static void 错误(string 消息)
+    {
+        写入日志("ERROR", 消息);
+    }
+
+    /// <summary>
+    /// 写入日志到文件（不输出到控制台）
+    /// </summary>
+    private static void 写入日志(string 级别, string 消息)
+    {
+        string 时间戳 = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        string 日志内容 = $"[{时间戳}] [{级别}] {消息}";
+
+        // 只写入文件，不输出到控制台（线程安全）
+        lock (日志锁)
+        {
+            try
+            {
+                // 检查文件大小，如果超过限制则清空
+                if (File.Exists(日志文件路径))
+                {
+                    var 文件信息 = new FileInfo(日志文件路径);
+                    if (文件信息.Length > 最大日志文件大小)
+                    {
+                        File.WriteAllText(日志文件路径, $"[{时间戳}] [INFO] 日志文件已超过大小限制，清空重新开始\n", Encoding.UTF8);
+                    }
+                }
+
+                // 追加写入日志文件
+                File.AppendAllText(日志文件路径, 日志内容 + Environment.NewLine, Encoding.UTF8);
+            }
+            catch
+            {
+                // 如果文件写入失败，静默处理（不输出任何信息，避免控制台刷屏）
+                // 如果需要调试，可以查看文件系统权限或磁盘空间
+            }
+        }
     }
 }
 

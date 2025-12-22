@@ -6,9 +6,23 @@ using 玩家数据结构;
 
 public class 家族显示判断 : MonoBehaviour
 {
+    public static 家族显示判断 实例 { get; private set; }
+
     public 家族信息显示 家族信息显示;
     public GameObject 无家族界面;
     public 家族列表显示 家族列表显示;
+    
+    private void Awake()
+    {
+        // 单例模式
+        if (实例 != null && 实例 != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+        实例 = this;
+    }
+    
     private void OnEnable()
     {
         刷新显示();
