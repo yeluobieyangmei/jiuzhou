@@ -690,10 +690,43 @@ public class SignalR连接管理 : MonoBehaviour
     {
         if (evt == null || string.IsNullOrEmpty(evt.channel)) return;
 
-        // 将消息添加到聊天系统
-        if (聊天系统管理.实例 != null)
+        // 将消息添加到聊天界面
+        if (聊天界面.实例 != null)
         {
-            聊天系统管理.实例.添加消息(evt.channel, evt.playerName, evt.message, false);
+            // 转换频道名称
+            聊天频道 频道 = 聊天频道.世界;
+            switch (evt.channel.ToLower())
+            {
+                case "world":
+                    频道 = 聊天频道.世界;
+                    break;
+                case "country":
+                    频道 = 聊天频道.国家;
+                    break;
+                case "clan":
+                    频道 = 聊天频道.家族;
+                    break;
+            }
+
+            // 格式化消息：HH:mm 玩家名 消息内容
+            string 时间 = DateTime.Now.ToString("HH:mm");
+            if (!string.IsNullOrEmpty(evt.messageTime))
+            {
+                try
+                {
+                    if (DateTime.TryParse(evt.messageTime, out DateTime 解析时间))
+                    {
+                        时间 = 解析时间.ToString("HH:mm");
+                    }
+                }
+                catch
+                {
+                    // 解析失败，使用当前时间
+                }
+            }
+            string 完整文本 = $"{时间} {evt.playerName} {evt.message}";
+            
+            聊天界面.实例.接收新消息(频道, 完整文本);
         }
     }
 
@@ -707,18 +740,33 @@ public class SignalR连接管理 : MonoBehaviour
         // 显示系统消息提示框
         通用提示框.显示(evt.message);
 
-        // 将消息添加到聊天系统的系统频道
-        if (聊天系统管理.实例 != null)
+        // 将消息添加到聊天界面的系统频道
+        if (聊天界面.实例 != null)
         {
-            聊天系统管理.实例.添加消息("system", "系统", evt.message, true);
-        }
-
-        // 如果消息是禁言通知，设置禁言状态
-        if (evt.message.Contains("禁言"))
-        {
-            if (聊天系统管理.实例 != null)
+            // 格式化消息：HH:mm 系统 消息内容
+            string 时间 = DateTime.Now.ToString("HH:mm");
+            if (!string.IsNullOrEmpty(evt.messageTime))
             {
-                聊天系统管理.实例.设置禁言状态(true);
+                try
+                {
+                    if (DateTime.TryParse(evt.messageTime, out DateTime 解析时间))
+                    {
+                        时间 = 解析时间.ToString("HH:mm");
+                    }
+                }
+                catch
+                {
+                    // 解析失败，使用当前时间
+                }
+            }
+            string 完整文本 = $"{时间} 系统 {evt.message}";
+            
+            聊天界面.实例.接收新消息(聊天频道.系统, 完整文本);
+
+            // 如果消息是禁言通知，设置禁言状态
+            if (evt.message.Contains("禁言"))
+            {
+                聊天界面.实例.设置禁言状态(true);
             }
         }
     }

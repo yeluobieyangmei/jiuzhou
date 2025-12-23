@@ -3710,7 +3710,7 @@ static async Task 处理消息(待处理消息 消息, string 数据库连接字
             );
             await deleteCommand.ExecuteNonQueryAsync();
 
-            // 广播给所有玩家
+            // 广播给所有玩家（排除发送者自己，因为发送者已经在本地显示了）
             var chatEvent = new ChatMessageEvent
             {
                 Channel = "world",
@@ -3719,7 +3719,8 @@ static async Task 处理消息(待处理消息 消息, string 数据库连接字
                 Message = 消息.消息内容,
                 MessageTime = DateTime.Now
             };
-            await WebSocketConnectionManager.BroadcastAsync(chatEvent);
+            // 向所有在线玩家广播，但排除发送者自己
+            await WebSocketConnectionManager.BroadcastExceptAsync(chatEvent, 消息.玩家ID, 玩家连接映射);
         }
         else if (消息.频道类型 == "country")
         {
@@ -3748,7 +3749,7 @@ static async Task 处理消息(待处理消息 消息, string 数据库连接字
                 );
                 await deleteCommand.ExecuteNonQueryAsync();
 
-                // 广播给所有玩家
+                // 只广播给该国家的所有在线玩家
                 var chatEvent = new ChatMessageEvent
                 {
                     Channel = "country",
@@ -3757,7 +3758,31 @@ static async Task 处理消息(待处理消息 消息, string 数据库连接字
                     Message = 消息.消息内容,
                     MessageTime = DateTime.Now
                 };
-                await WebSocketConnectionManager.BroadcastAsync(chatEvent);
+                // 查询该国家的所有在线玩家ID，然后只向这些玩家发送消息
+                using var countryPlayersCommand = new MySqlCommand(
+                    "SELECT id FROM players WHERE country_id = @country_id",
+                    connection
+                );
+                countryPlayersCommand.Parameters.AddWithValue("@country_id", 消息.国家ID.Value);
+                var 国家玩家ID列表 = new List<int>();
+                using var countryPlayersReader = await countryPlayersCommand.ExecuteReaderAsync();
+                while (await countryPlayersReader.ReadAsync())
+                {
+                    国家玩家ID列表.Add(countryPlayersReader.GetInt32(0));
+                }
+                countryPlayersReader.Close();
+                
+                // 只向该国家的在线玩家发送消息（排除发送者自己）
+                foreach (var 玩家ID in 国家玩家ID列表)
+                {
+                    // 排除发送者自己，因为发送者已经在本地显示了
+                    if (玩家ID == 消息.玩家ID) continue;
+                    
+                    if (玩家连接映射.TryGetValue(玩家ID, out var socket) && socket != null && socket.State == WebSocketState.Open)
+                    {
+                        await WebSocketConnectionManager.SendToPlayerAsync(玩家ID, chatEvent, 玩家连接映射);
+                    }
+                }
             }
         }
         else if (消息.频道类型 == "clan")
@@ -3787,7 +3812,7 @@ static async Task 处理消息(待处理消息 消息, string 数据库连接字
                 );
                 await deleteCommand.ExecuteNonQueryAsync();
 
-                // 广播给所有玩家
+                // 只广播给该家族的所有在线玩家
                 var chatEvent = new ChatMessageEvent
                 {
                     Channel = "clan",
@@ -3796,7 +3821,31 @@ static async Task 处理消息(待处理消息 消息, string 数据库连接字
                     Message = 消息.消息内容,
                     MessageTime = DateTime.Now
                 };
-                await WebSocketConnectionManager.BroadcastAsync(chatEvent);
+                // 查询该家族的所有在线玩家ID，然后只向这些玩家发送消息
+                using var clanPlayersCommand = new MySqlCommand(
+                    "SELECT id FROM players WHERE clan_id = @clan_id",
+                    connection
+                );
+                clanPlayersCommand.Parameters.AddWithValue("@clan_id", 消息.家族ID.Value);
+                var 家族玩家ID列表 = new List<int>();
+                using var clanPlayersReader = await clanPlayersCommand.ExecuteReaderAsync();
+                while (await clanPlayersReader.ReadAsync())
+                {
+                    家族玩家ID列表.Add(clanPlayersReader.GetInt32(0));
+                }
+                clanPlayersReader.Close();
+                
+                // 只向该家族的在线玩家发送消息（排除发送者自己）
+                foreach (var 玩家ID in 家族玩家ID列表)
+                {
+                    // 排除发送者自己，因为发送者已经在本地显示了
+                    if (玩家ID == 消息.玩家ID) continue;
+                    
+                    if (玩家连接映射.TryGetValue(玩家ID, out var socket) && socket != null && socket.State == WebSocketState.Open)
+                    {
+                        await WebSocketConnectionManager.SendToPlayerAsync(玩家ID, chatEvent, 玩家连接映射);
+                    }
+                }
             }
         }
     }
@@ -4202,6 +4251,70 @@ public static class WebSocketConnectionManager
         {
             日志记录器.错误($"[WebSocket] 向玩家{playerId}发送消息失败: {ex.Message}");
             玩家连接映射.TryRemove(playerId, out _);
+        }
+    }
+
+    /// <summary>
+    /// 向所有在线 WebSocket 客户端广播事件，但排除指定玩家ID（用于聊天消息，避免发送者收到重复消息）
+    /// </summary>
+    public static async Task BroadcastExceptAsync(object eventData, int excludePlayerId, ConcurrentDictionary<int, WebSocket> 玩家连接映射)
+    {
+        if (eventData == null) return;
+        if (连接集合.IsEmpty) return;
+
+        string json;
+        try
+        {
+            json = JsonSerializer.Serialize(eventData, Json选项);
+        }
+        catch (Exception ex)
+        {
+            日志记录器.错误($"[WebSocket] 序列化事件失败: {ex.Message}");
+            return;
+        }
+
+        var buffer = Encoding.UTF8.GetBytes(json);
+        var segment = new ArraySegment<byte>(buffer);
+
+        var 需要移除的连接 = new List<WebSocket>();
+
+        foreach (var kvp in 连接集合.Keys)
+        {
+            var socket = kvp;
+            if (socket.State != WebSocketState.Open)
+            {
+                需要移除的连接.Add(socket);
+                continue;
+            }
+
+            // 检查这个连接是否属于要排除的玩家
+            bool 是否排除 = false;
+            foreach (var kvp2 in 玩家连接映射)
+            {
+                if (kvp2.Value == socket && kvp2.Key == excludePlayerId)
+                {
+                    是否排除 = true;
+                    break;
+                }
+            }
+
+            if (是否排除) continue;
+
+            try
+            {
+                await socket.SendAsync(segment, WebSocketMessageType.Text, true, CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                日志记录器.错误($"[WebSocket] 发送消息失败，移除连接: {ex.Message}");
+                需要移除的连接.Add(socket);
+            }
+        }
+
+        // 清理失效连接
+        foreach (var socket in 需要移除的连接)
+        {
+            RemoveConnection(socket);
         }
     }
 }

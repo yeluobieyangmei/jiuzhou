@@ -51,8 +51,6 @@ public class 记住账号密码 : MonoBehaviour
 
             // 写入文件
             File.WriteAllText(保存路径, 保存内容);
-
-            Debug.Log($"账号密码已保存到: {保存路径}");
         }
         catch (System.Exception e)
         {
