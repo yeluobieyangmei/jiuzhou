@@ -30,10 +30,23 @@ public class 聊天系统管理 : MonoBehaviour
     public InputField 消息输入框;
     public Button 发送按钮;
     public Text 发送按钮文本;
-    public Text 字数提示文本;
+    //public Text 字数提示文本;
 
-    [Header("消息项预制体")]
-    public GameObject 消息项预制体;
+    [Header("世界频道消息项")]
+    public Transform 世界父对象;
+    public GameObject 世界要克隆的对象;
+
+    [Header("国家频道消息项")]
+    public Transform 国家父对象;
+    public GameObject 国家要克隆的对象;
+
+    [Header("家族频道消息项")]
+    public Transform 家族父对象;
+    public GameObject 家族要克隆的对象;
+
+    [Header("系统频道消息项")]
+    public Transform 系统父对象;
+    public GameObject 系统要克隆的对象;
 
     [Header("接口地址")]
     private string 发送世界消息地址 = "http://43.139.181.191:5000/api/sendWorldMessage";
@@ -136,28 +149,82 @@ public class 聊天系统管理 : MonoBehaviour
     /// </summary>
     private void 初始化对象池()
     {
-        if (消息项预制体 == null)
+        // 检查并隐藏世界频道的原始对象
+        if (世界要克隆的对象 != null && 世界父对象 != null)
         {
-            Debug.LogError("消息项预制体未设置！");
-            return;
+            世界要克隆的对象.SetActive(false);
+            for (int i = 0; i < 10; i++)
+            {
+                世界消息对象池.Enqueue(创建消息对象("world"));
+            }
         }
 
-        // 为每个频道预创建10个对象
-        for (int i = 0; i < 10; i++)
+        // 检查并隐藏国家频道的原始对象
+        if (国家要克隆的对象 != null && 国家父对象 != null)
         {
-            世界消息对象池.Enqueue(创建消息对象());
-            国家消息对象池.Enqueue(创建消息对象());
-            家族消息对象池.Enqueue(创建消息对象());
-            系统消息对象池.Enqueue(创建消息对象());
+            国家要克隆的对象.SetActive(false);
+            for (int i = 0; i < 10; i++)
+            {
+                国家消息对象池.Enqueue(创建消息对象("country"));
+            }
+        }
+
+        // 检查并隐藏家族频道的原始对象
+        if (家族要克隆的对象 != null && 家族父对象 != null)
+        {
+            家族要克隆的对象.SetActive(false);
+            for (int i = 0; i < 10; i++)
+            {
+                家族消息对象池.Enqueue(创建消息对象("clan"));
+            }
+        }
+
+        // 检查并隐藏系统频道的原始对象
+        if (系统要克隆的对象 != null && 系统父对象 != null)
+        {
+            系统要克隆的对象.SetActive(false);
+            for (int i = 0; i < 10; i++)
+            {
+                系统消息对象池.Enqueue(创建消息对象("system"));
+            }
         }
     }
 
     /// <summary>
     /// 创建消息对象
     /// </summary>
-    private GameObject 创建消息对象()
+    private GameObject 创建消息对象(string 频道)
     {
-        GameObject obj = Instantiate(消息项预制体);
+        GameObject 克隆对象 = null;
+        Transform 父对象 = null;
+
+        switch (频道)
+        {
+            case "world":
+                克隆对象 = 世界要克隆的对象;
+                父对象 = 世界父对象;
+                break;
+            case "country":
+                克隆对象 = 国家要克隆的对象;
+                父对象 = 国家父对象;
+                break;
+            case "clan":
+                克隆对象 = 家族要克隆的对象;
+                父对象 = 家族父对象;
+                break;
+            case "system":
+                克隆对象 = 系统要克隆的对象;
+                父对象 = 系统父对象;
+                break;
+        }
+
+        if (克隆对象 == null || 父对象 == null)
+        {
+            Debug.LogError($"频道 {频道} 的克隆对象或父对象未设置！");
+            return null;
+        }
+
+        GameObject obj = Instantiate(克隆对象, 父对象);
         obj.SetActive(false);
         return obj;
     }
@@ -193,7 +260,7 @@ public class 聊天系统管理 : MonoBehaviour
         }
         else
         {
-            obj = 创建消息对象();
+            obj = 创建消息对象(频道);
         }
 
         obj.SetActive(true);
@@ -208,27 +275,42 @@ public class 聊天系统管理 : MonoBehaviour
         if (obj == null) return;
 
         obj.SetActive(false);
-        消息项UI 消息项 = obj.GetComponent<消息项UI>();
-        if (消息项 != null)
+        
+        // 重置Text组件内容（对象自身挂载了Text组件）
+        Text 文本组件 = obj.GetComponent<Text>();
+        if (文本组件 != null)
         {
-            消息项.重置();
+            文本组件.text = "";
+            文本组件.color = Color.white; // 重置为默认颜色
         }
 
+        // 将对象放回对应频道的父对象下
+        Transform 父对象 = null;
         Queue<GameObject> 对象池 = null;
         switch (频道)
         {
             case "world":
+                父对象 = 世界父对象;
                 对象池 = 世界消息对象池;
                 break;
             case "country":
+                父对象 = 国家父对象;
                 对象池 = 国家消息对象池;
                 break;
             case "clan":
+                父对象 = 家族父对象;
                 对象池 = 家族消息对象池;
                 break;
             case "system":
+                父对象 = 系统父对象;
                 对象池 = 系统消息对象池;
                 break;
+        }
+
+        // 将对象放回父对象下
+        if (父对象 != null)
+        {
+            obj.transform.SetParent(父对象, false);
         }
 
         if (对象池 != null)
@@ -279,11 +361,9 @@ public class 聊天系统管理 : MonoBehaviour
     /// </summary>
     private void 更新字数提示(string 文本)
     {
-        if (字数提示文本 == null) return;
-
         int 当前字数 = 文本.Length;
         int 最大字数 = 20;
-        字数提示文本.text = $"{当前字数}/{最大字数}";
+        通用提示框.显示("消息不可超过20字!");
 
         // 如果超过20字，截断
         if (当前字数 > 最大字数 && 消息输入框 != null)
@@ -533,7 +613,7 @@ public class 聊天系统管理 : MonoBehaviour
     /// </summary>
     public void 添加消息(string 频道, string 玩家名称, string 消息内容, bool 是系统消息 = false)
     {
-        string 时间 = DateTime.Now.ToString("HH:mm:ss");
+        string 时间 = DateTime.Now.ToString("HH:mm");
         添加消息到列表(频道, 玩家名称, 消息内容, 时间, 是系统消息);
     }
 
@@ -570,11 +650,23 @@ public class 聊天系统管理 : MonoBehaviour
 
         if (容器 == null || 消息列表 == null) return;
 
-        // 设置消息内容
-        消息项UI 消息项 = 消息对象.GetComponent<消息项UI>();
-        if (消息项 != null)
+        // 设置消息内容（格式：时间 玩家名 消息内容）
+        Text 文本组件 = 消息对象.GetComponent<Text>();
+        if (文本组件 != null)
         {
-            消息项.设置消息(玩家名称, 消息内容, 时间, 是系统消息);
+            // 格式：04:06 玩家名 消息内容
+            string 完整消息 = $"{时间} {玩家名称} {消息内容}";
+            文本组件.text = 完整消息;
+            
+            // 系统消息使用红色字体
+            if (是系统消息)
+            {
+                文本组件.color = Color.red;
+            }
+            else
+            {
+                文本组件.color = Color.white;
+            }
         }
 
         // 添加到容器
@@ -618,7 +710,7 @@ public class 聊天系统管理 : MonoBehaviour
                 response.data.Reverse();
                 foreach (var msg in response.data)
                 {
-                    string 时间 = DateTime.Parse(msg.messageTime).ToString("HH:mm:ss");
+                    string 时间 = DateTime.Parse(msg.messageTime).ToString("HH:mm");
                     添加消息到列表("world", msg.playerName, msg.message, 时间, false);
                 }
             }
@@ -643,7 +735,7 @@ public class 聊天系统管理 : MonoBehaviour
                 response.data.Reverse();
                 foreach (var msg in response.data)
                 {
-                    string 时间 = DateTime.Parse(msg.messageTime).ToString("HH:mm:ss");
+                    string 时间 = DateTime.Parse(msg.messageTime).ToString("HH:mm");
                     添加消息到列表("country", msg.playerName, msg.message, 时间, false);
                 }
             }
@@ -668,7 +760,7 @@ public class 聊天系统管理 : MonoBehaviour
                 response.data.Reverse();
                 foreach (var msg in response.data)
                 {
-                    string 时间 = DateTime.Parse(msg.messageTime).ToString("HH:mm:ss");
+                    string 时间 = DateTime.Parse(msg.messageTime).ToString("HH:mm");
                     添加消息到列表("clan", msg.playerName, msg.message, 时间, false);
                 }
             }
