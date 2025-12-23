@@ -15,8 +15,11 @@ public class 记住账号密码 : MonoBehaviour
 
     void Start()
     {
-        // 初始化保存路径（放在游戏根目录）
-        保存路径 = Path.Combine(Application.dataPath, "../", 保存文件名);
+        // 初始化保存路径（使用持久化数据路径，跨平台兼容）
+        // PC: %USERPROFILE%\AppData\LocalLow\<CompanyName>\<ProductName>
+        // Android: /data/data/<packageName>/files/
+        // iOS: /var/mobile/Containers/Data/Application/<guid>/Documents/
+        保存路径 = Path.Combine(Application.persistentDataPath, 保存文件名);
 
         // 绑定登录按钮点击事件
         登录按钮.onClick.AddListener(保存账号密码);
@@ -46,15 +49,31 @@ public class 记住账号密码 : MonoBehaviour
             string 账号 = 账号输入框.text;
             string 密码 = 密码输入框.text;
 
-            // 创建要保存的内容
-            string 保存内容 = $"账号:{账号}\n密码:{密码}\n保存时间:{DateTime.Now}";
+            // 检查输入是否为空
+            if (string.IsNullOrEmpty(账号) || string.IsNullOrEmpty(密码))
+            {
+                Debug.LogWarning("[记住账号密码] 账号或密码为空，跳过保存");
+                return;
+            }
+
+            // 创建要保存的内容（只保存账号和密码）
+            string 保存内容 = $"账号:{账号}\n密码:{密码}";
+
+            // 确保目录存在
+            string 目录路径 = Path.GetDirectoryName(保存路径);
+            if (!Directory.Exists(目录路径))
+            {
+                Directory.CreateDirectory(目录路径);
+                Debug.Log($"[记住账号密码] 创建目录: {目录路径}");
+            }
 
             // 写入文件
-            File.WriteAllText(保存路径, 保存内容);
+            File.WriteAllText(保存路径, 保存内容, System.Text.Encoding.UTF8);
+            Debug.Log($"[记住账号密码] 保存成功: {保存路径}");
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"保存账号密码时出错: {e.Message}");
+            Debug.LogError($"[记住账号密码] 保存账号密码时出错: {e.Message}\n堆栈: {e.StackTrace}");
         }
     }
 
@@ -63,42 +82,54 @@ public class 记住账号密码 : MonoBehaviour
     {
         try
         {
+            // 检查输入框是否已初始化
+            if (账号输入框 == null || 密码输入框 == null)
+            {
+                Debug.LogWarning("[记住账号密码] 输入框未初始化，跳过读取");
+                return;
+            }
+
             // 检查文件是否存在
             if (!File.Exists(保存路径))
             {
-                Debug.Log($"保存文件不存在: {保存路径}");
+                Debug.Log($"[记住账号密码] 保存文件不存在: {保存路径}");
                 return;
             }
 
             // 读取文件内容
-            string 文件内容 = File.ReadAllText(保存路径);
+            string 文件内容 = File.ReadAllText(保存路径, System.Text.Encoding.UTF8);
 
             // 解析账号密码
             string 账号 = "";
             string 密码 = "";
 
-            string[] 行数组 = 文件内容.Split('\n');
+            string[] 行数组 = 文件内容.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
             foreach (string 行 in 行数组)
             {
-                if (行.StartsWith("账号:"))
+                string 清理后的行 = 行.Trim();
+                if (清理后的行.StartsWith("账号:"))
                 {
-                    账号 = 行.Substring("账号:".Length);
+                    账号 = 清理后的行.Substring("账号:".Length).Trim();
                 }
-                else if (行.StartsWith("密码:"))
+                else if (清理后的行.StartsWith("密码:"))
                 {
-                    密码 = 行.Substring("密码:".Length);
+                    密码 = 清理后的行.Substring("密码:".Length).Trim();
                 }
             }
 
             // 将账号密码填入输入框
-            账号输入框.text = 账号;
-            密码输入框.text = 密码;
-
-            Debug.Log("账号密码已自动填入输入框");
+            if (!string.IsNullOrEmpty(账号))
+            {
+                账号输入框.text = 账号;
+            }
+            if (!string.IsNullOrEmpty(密码))
+            {
+                密码输入框.text = 密码;
+            }
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"读取账号密码时出错: {e.Message}");
+
         }
     }
 

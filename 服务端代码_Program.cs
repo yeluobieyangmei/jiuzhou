@@ -28,7 +28,11 @@ builder.Services.AddControllers()
         options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.PropertyNameCaseInsensitive = true;
         options.JsonSerializerOptions.Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping; // 支持中文字符
+        options.JsonSerializerOptions.ReadCommentHandling = JsonCommentHandling.Skip; // 允许注释
+        options.JsonSerializerOptions.AllowTrailingCommas = true; // 允许尾随逗号
     });
+
+// 注意：Minimal API 的 JSON 选项会使用 AddControllers 中配置的 JsonSerializerOptions
 
 // 添加 SignalR 服务
 builder.Services.AddSignalR(options =>
@@ -143,6 +147,33 @@ var 消息处理任务 = Task.Run(async () =>
 });
 
 var app = builder.Build();
+
+// 添加全局异常处理中间件（捕获JSON解析错误等）
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Microsoft.AspNetCore.Http.BadHttpRequestException badRequestEx) when (badRequestEx.Message.Contains("JSON"))
+    {
+        // JSON解析错误，返回友好的错误消息
+        日志记录器.错误($"[全局异常处理] JSON解析错误: {badRequestEx.Message}");
+        context.Response.StatusCode = 200; // 返回200，但success=false
+        context.Response.ContentType = "application/json";
+        var errorResponse = new LoginResponse(false, "请求格式错误：请检查JSON格式是否正确", "", -1);
+        await context.Response.WriteAsJsonAsync(errorResponse);
+    }
+    catch (System.Text.Json.JsonException jsonEx)
+    {
+        // JSON解析错误
+        日志记录器.错误($"[全局异常处理] JSON解析错误: {jsonEx.Message}");
+        context.Response.StatusCode = 200;
+        context.Response.ContentType = "application/json";
+        var errorResponse = new LoginResponse(false, "请求格式错误：JSON格式不正确", "", -1);
+        await context.Response.WriteAsJsonAsync(errorResponse);
+    }
+});
 
 // 启用 WebSocket 支持（用于自建简单 WebSocket 端点，向 Unity 客户端推送事件）
 app.UseWebSockets();
@@ -267,10 +298,76 @@ app.MapHub<GameHub>("/gameHub");
 
 // =================== 登录接口：POST /api/login ===================
 
-app.MapPost("/api/login", async ([FromBody] LoginRequest 请求) =>
+app.MapPost("/api/login", async (HttpContext context) =>
 {
     try
     {
+        // 读取原始请求体
+        context.Request.EnableBuffering(); // 允许多次读取请求体
+        context.Request.Body.Position = 0;
+        using var bodyReader = new System.IO.StreamReader(context.Request.Body, Encoding.UTF8, leaveOpen: true);
+        string rawBody = await bodyReader.ReadToEndAsync();
+        context.Request.Body.Position = 0; // 重置位置
+        
+        日志记录器.信息($"[登录接口] 收到请求体: {rawBody}");
+        
+        // 手动解析JSON（使用更宽松的配置）
+        LoginRequest? 请求 = null;
+        try
+        {
+            var jsonOptions = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                PropertyNameCaseInsensitive = true,
+                ReadCommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            };
+            
+            请求 = JsonSerializer.Deserialize<LoginRequest>(rawBody, jsonOptions);
+        }
+        catch (Exception jsonEx)
+        {
+            日志记录器.错误($"[登录接口] JSON解析失败: {jsonEx.Message}, 原始请求体: {rawBody}");
+            
+            // 尝试手动提取username和password（容错处理）
+            try
+            {
+                string? username = null;
+                string? password = null;
+                
+                // 简单的正则表达式提取
+                var usernameMatch = System.Text.RegularExpressions.Regex.Match(rawBody, @"""username""\s*:\s*""([^""]*)""");
+                var passwordMatch = System.Text.RegularExpressions.Regex.Match(rawBody, @"""password""\s*:\s*""([^""]*)""");
+                
+                if (usernameMatch.Success) username = usernameMatch.Groups[1].Value;
+                if (passwordMatch.Success) password = passwordMatch.Groups[1].Value;
+                
+                if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+                {
+                    请求 = new LoginRequest(username, password);
+                    日志记录器.信息($"[登录接口] 使用容错解析成功: username={username}");
+                }
+                else
+                {
+                    return Results.Ok(new LoginResponse(false, $"请求格式错误：无法解析JSON，原始内容: {rawBody.Substring(0, Math.Min(100, rawBody.Length))}", "", -1));
+                }
+            }
+            catch
+            {
+                return Results.Ok(new LoginResponse(false, $"请求格式错误：JSON解析失败", "", -1));
+            }
+        }
+        
+        // 检查请求是否为空
+        if (请求 == null)
+        {
+            return Results.Ok(new LoginResponse(false, "请求数据为空", "", -1));
+        }
+        
+        // 清理密码字段中的换行符和回车符（防止客户端发送包含换行符的密码）
+        string 清理后的密码 = 请求.Password?.Replace("\r", "").Replace("\n", "").Trim() ?? "";
+        // 创建新的请求对象（避免修改原始对象）
+        var 清理后的请求 = new LoginRequest(请求.Username, 清理后的密码);
         // 连接 MySQL 数据库
         using var connection = new MySqlConnection(数据库连接字符串);
         await connection.OpenAsync();
@@ -280,7 +377,7 @@ app.MapPost("/api/login", async ([FromBody] LoginRequest 请求) =>
             "SELECT id, password_hash, failed_login_count, locked_until FROM accounts WHERE username = @username",
             connection
         );
-        command.Parameters.AddWithValue("@username", 请求.Username);
+        command.Parameters.AddWithValue("@username", 清理后的请求.Username);
 
         using var reader = await command.ExecuteReaderAsync();
         
@@ -302,7 +399,7 @@ app.MapPost("/api/login", async ([FromBody] LoginRequest 请求) =>
             }
 
             // 账号未锁定或已过期，检查密码
-            string 输入密码哈希 = 计算SHA256(请求.Password);
+            string 输入密码哈希 = 计算SHA256(清理后的请求.Password);
 
             if (数据库中的密码哈希 == 输入密码哈希)
             {
