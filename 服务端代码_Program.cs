@@ -94,6 +94,9 @@ var 清理超时账号任务 = Task.Run(async () =>
             }
             
             // 静默清理超时账号，不输出日志（避免控制台刷屏）
+            
+            // 清理超时的WebSocket连接
+            await WebSocketConnectionManager.CheckAndCleanTimeoutConnections(玩家连接映射, 在线账号集合, 数据库连接字符串);
         }
         catch (Exception ex)
         {
@@ -231,27 +234,38 @@ app.Map("/ws", async context =>
             {
                 var msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
                 
-                // 处理玩家ID注册消息（格式：{"type":"registerPlayerId","playerId":123}）
-                if (!已注册玩家ID)
+                // 处理不同类型的消息
+                try
                 {
-                    try
+                    var jsonDoc = JsonDocument.Parse(msg);
+                    if (jsonDoc.RootElement.TryGetProperty("type", out var typeProp))
                     {
-                        var jsonDoc = JsonDocument.Parse(msg);
-                        if (jsonDoc.RootElement.TryGetProperty("type", out var typeProp) && 
-                            typeProp.GetString() == "registerPlayerId" &&
+                        string? 消息类型 = typeProp.GetString();
+                        
+                        // 处理心跳消息
+                        if (消息类型 == "heartbeat")
+                        {
+                            WebSocketConnectionManager.UpdateHeartbeat(webSocket);
+                            // 心跳消息不记录日志，避免日志过多
+                            continue;
+                        }
+                        
+                        // 处理玩家ID注册消息
+                        if (!已注册玩家ID && 消息类型 == "registerPlayerId" &&
                             jsonDoc.RootElement.TryGetProperty("playerId", out var playerIdProp))
                         {
                             int 注册玩家ID = playerIdProp.GetInt32();
                             玩家连接映射.AddOrUpdate(注册玩家ID, webSocket, (key, oldValue) => webSocket);
                             已注册玩家ID = true;
+                            WebSocketConnectionManager.UpdateHeartbeat(webSocket);
                             日志记录器.信息($"[WebSocket] 玩家ID已注册: {注册玩家ID}");
                             continue;
                         }
                     }
-                    catch
-                    {
-                        // 解析失败，忽略
-                    }
+                }
+                catch
+                {
+                    // 解析失败，忽略
                 }
                 
                 日志记录器.信息($"[WebSocket] 收到客户端消息（忽略处理）：{msg}");
@@ -267,10 +281,33 @@ app.Map("/ws", async context =>
         // 从全局管理器中移除连接
         WebSocketConnectionManager.RemoveConnection(webSocket);
         
-        // 从玩家连接映射中移除
+        // 从玩家连接映射中移除，并同时从在线账号集合中移除
         if (玩家ID.HasValue)
         {
             玩家连接映射.TryRemove(玩家ID.Value, out _);
+            
+            // 根据玩家ID查询账号ID，并从在线账号集合中移除
+            try
+            {
+                using var connection = new MySqlConnection(数据库连接字符串);
+                connection.Open();
+                using var command = new MySqlCommand(
+                    "SELECT account_id FROM players WHERE id = @player_id LIMIT 1",
+                    connection
+                );
+                command.Parameters.AddWithValue("@player_id", 玩家ID.Value);
+                var accountIdResult = command.ExecuteScalar();
+                if (accountIdResult != null && !DBNull.Value.Equals(accountIdResult))
+                {
+                    int 账号ID = Convert.ToInt32(accountIdResult);
+                    在线账号集合.TryRemove(账号ID, out _);
+                    日志记录器.信息($"[WebSocket] 账号 {账号ID} (玩家 {玩家ID.Value}) 已从在线集合中移除");
+                }
+            }
+            catch (Exception ex)
+            {
+                日志记录器.错误($"[WebSocket] 查询账号ID失败: {ex.Message}");
+            }
         }
         else
         {
@@ -286,6 +323,29 @@ app.Map("/ws", async context =>
             foreach (var pid in 要移除的玩家ID列表)
             {
                 玩家连接映射.TryRemove(pid, out _);
+                
+                // 根据玩家ID查询账号ID，并从在线账号集合中移除
+                try
+                {
+                    using var connection = new MySqlConnection(数据库连接字符串);
+                    connection.Open();
+                    using var command = new MySqlCommand(
+                        "SELECT account_id FROM players WHERE id = @player_id LIMIT 1",
+                        connection
+                    );
+                    command.Parameters.AddWithValue("@player_id", pid);
+                    var accountIdResult = command.ExecuteScalar();
+                    if (accountIdResult != null && !DBNull.Value.Equals(accountIdResult))
+                    {
+                        int 账号ID = Convert.ToInt32(accountIdResult);
+                        在线账号集合.TryRemove(账号ID, out _);
+                        日志记录器.信息($"[WebSocket] 账号 {账号ID} (玩家 {pid}) 已从在线集合中移除");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    日志记录器.错误($"[WebSocket] 查询账号ID失败: {ex.Message}");
+                }
             }
         }
         
@@ -406,8 +466,50 @@ app.MapPost("/api/login", async (HttpContext context) =>
                 // 密码正确，检查账号是否已在线
                 if (在线账号集合.ContainsKey(账号ID))
                 {
-                    reader.Close();
-                    return Results.Ok(new LoginResponse(false, "当前账号已在线，禁止重复登录！", "", -1));
+                    // 检查WebSocket连接是否真的活跃
+                    bool 连接真的活跃 = false;
+                    
+                    // 查询该账号对应的玩家ID
+                    reader.Close(); // 先关闭reader，才能执行新查询
+                    using var playerCommand = new MySqlCommand(
+                        "SELECT id FROM players WHERE account_id = @account_id LIMIT 1",
+                        connection
+                    );
+                    playerCommand.Parameters.AddWithValue("@account_id", 账号ID);
+                    var playerIdResult = await playerCommand.ExecuteScalarAsync();
+                    
+                    if (playerIdResult != null && !DBNull.Value.Equals(playerIdResult))
+                    {
+                        int 玩家ID = Convert.ToInt32(playerIdResult);
+                        
+                        // 检查玩家连接映射中是否有该玩家，且连接状态是Open
+                        if (玩家连接映射.TryGetValue(玩家ID, out var existingSocket))
+                        {
+                            if (existingSocket != null && existingSocket.State == WebSocketState.Open)
+                            {
+                                连接真的活跃 = true;
+                            }
+                            else
+                            {
+                                // 连接已断开，从映射中移除
+                                玩家连接映射.TryRemove(玩家ID, out _);
+                                在线账号集合.TryRemove(账号ID, out _);
+                                日志记录器.信息($"[登录] 检测到账号 {账号ID} 的连接已断开，允许重新登录");
+                            }
+                        }
+                        else
+                        {
+                            // 连接映射中不存在，说明连接已断开
+                            在线账号集合.TryRemove(账号ID, out _);
+                            日志记录器.信息($"[登录] 账号 {账号ID} 的连接映射不存在，允许重新登录");
+                        }
+                    }
+                    
+                    if (连接真的活跃)
+                    {
+                        return Results.Ok(new LoginResponse(false, "当前账号已在线，禁止重复登录！", "", -1));
+                    }
+                    // 如果连接不活跃，继续执行登录流程
                 }
 
                 // 账号未在线，登录成功
@@ -4240,6 +4342,13 @@ public static class WebSocketConnectionManager
     // 使用 ConcurrentDictionary 存储所有在线的 WebSocket 连接
     // Key: WebSocket 实例, Value: 占位（未使用）
     private static readonly ConcurrentDictionary<WebSocket, byte> 连接集合 = new();
+    
+    // 连接的最后心跳时间记录
+    // Key: WebSocket 实例, Value: 最后心跳时间
+    private static readonly ConcurrentDictionary<WebSocket, DateTime> 连接心跳时间 = new();
+    
+    // WebSocket心跳超时时间（秒）- 如果超过这个时间没有心跳，断开连接
+    private const int WebSocket心跳超时秒数 = 30; // 30秒无心跳则断开（客户端20秒发送一次，30秒足够）
 
     // JSON 序列化选项（与全局 JSON 配置保持一致：camelCase + 支持中文）
     private static readonly JsonSerializerOptions Json选项 = new JsonSerializerOptions
@@ -4256,6 +4365,16 @@ public static class WebSocketConnectionManager
     {
         if (socket == null) return;
         连接集合.TryAdd(socket, 0);
+        连接心跳时间.AddOrUpdate(socket, DateTime.Now, (key, oldValue) => DateTime.Now);
+    }
+    
+    /// <summary>
+    /// 更新连接的心跳时间
+    /// </summary>
+    public static void UpdateHeartbeat(WebSocket socket)
+    {
+        if (socket == null) return;
+        连接心跳时间.AddOrUpdate(socket, DateTime.Now, (key, oldValue) => DateTime.Now);
     }
 
     /// <summary>
@@ -4265,6 +4384,93 @@ public static class WebSocketConnectionManager
     {
         if (socket == null) return;
         连接集合.TryRemove(socket, out _);
+        连接心跳时间.TryRemove(socket, out _);
+    }
+    
+    /// <summary>
+    /// 检查并清理超时的WebSocket连接
+    /// </summary>
+    public static async Task CheckAndCleanTimeoutConnections(ConcurrentDictionary<int, WebSocket> 玩家连接映射, ConcurrentDictionary<int, DateTime> 在线账号集合, string 数据库连接字符串)
+    {
+        var 当前时间 = DateTime.Now;
+        var 需要断开的连接 = new List<WebSocket>();
+        
+        foreach (var kvp in 连接心跳时间)
+        {
+            var socket = kvp.Key;
+            var 最后心跳时间 = kvp.Value;
+            
+            // 检查连接是否超时
+            var 超时秒数 = (当前时间 - 最后心跳时间).TotalSeconds;
+            if (超时秒数 > WebSocket心跳超时秒数)
+            {
+                需要断开的连接.Add(socket);
+            }
+            // 检查连接状态是否已关闭
+            else if (socket.State != WebSocketState.Open)
+            {
+                需要断开的连接.Add(socket);
+            }
+        }
+        
+        // 断开超时连接
+        foreach (var socket in 需要断开的连接)
+        {
+            try
+            {
+                日志记录器.信息($"[WebSocket] 检测到超时连接，正在断开...");
+                
+                // 从玩家连接映射中移除
+                var 要移除的玩家ID列表 = new List<int>();
+                foreach (var kvp in 玩家连接映射)
+                {
+                    if (kvp.Value == socket)
+                    {
+                        要移除的玩家ID列表.Add(kvp.Key);
+                    }
+                }
+                foreach (var pid in 要移除的玩家ID列表)
+                {
+                    玩家连接映射.TryRemove(pid, out _);
+                    
+                    // 根据玩家ID查询账号ID，并从在线账号集合中移除
+                    try
+                    {
+                        using var connection = new MySqlConnection(数据库连接字符串);
+                        connection.Open();
+                        using var command = new MySqlCommand(
+                            "SELECT account_id FROM players WHERE id = @player_id LIMIT 1",
+                            connection
+                        );
+                        command.Parameters.AddWithValue("@player_id", pid);
+                        var accountIdResult = command.ExecuteScalar();
+                        if (accountIdResult != null && !DBNull.Value.Equals(accountIdResult))
+                        {
+                            int 账号ID = Convert.ToInt32(accountIdResult);
+                            在线账号集合.TryRemove(账号ID, out _);
+                            日志记录器.信息($"[WebSocket] 超时断开：账号 {账号ID} (玩家 {pid}) 已从在线集合中移除");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        日志记录器.错误($"[WebSocket] 查询账号ID失败: {ex.Message}");
+                    }
+                }
+                
+                // 关闭连接
+                if (socket.State == WebSocketState.Open)
+                {
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "心跳超时", CancellationToken.None);
+                }
+                
+                // 从管理器中移除
+                RemoveConnection(socket);
+            }
+            catch (Exception ex)
+            {
+                日志记录器.错误($"[WebSocket] 断开超时连接失败: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>

@@ -31,9 +31,24 @@ public class SignalR连接管理 : MonoBehaviour
     // 连接状态
     private bool 是否已连接 = false;
     private bool 是否正在连接 = false;
+    private bool 是否正在重连 = false;
 
     // 当前玩家所属的家族ID（用于加入/离开家族组）
     private int 当前家族ID = -1;
+
+    // 心跳机制
+    private float 心跳间隔 = 20f; // 20秒发送一次心跳
+    private float 上次心跳时间 = 0f;
+    private Coroutine 心跳协程 = null;
+    private Coroutine 重连协程 = null;
+
+    // 重连机制
+    private float 重连间隔 = 5f; // 5秒后重连
+    private int 最大重连次数 = 10; // 最多重连10次
+    private int 当前重连次数 = 0;
+
+    // 应用生命周期状态
+    private bool 应用在前台 = true;
 
     // UI 组件引用缓存（避免使用 FindObjectOfType）
     private 家族显示判断 家族显示判断组件缓存;
@@ -57,6 +72,47 @@ public class SignalR连接管理 : MonoBehaviour
     {
         // 缓存 UI 组件引用（在 Start 中获取，确保场景中的组件已初始化）
         // 注意：这些组件可能不在当前场景，所以缓存可能为 null，需要在需要时重新获取
+        
+        // 启动时自动建立连接
+        建立连接();
+    }
+
+    private void OnApplicationPause(bool pauseStatus)
+    {
+        // 应用进入后台或恢复前台
+        应用在前台 = !pauseStatus;
+        if (pauseStatus)
+        {
+            Debug.Log("[WebSocket] 应用进入后台");
+        }
+        else
+        {
+            Debug.Log("[WebSocket] 应用恢复前台");
+            // 恢复前台时检查连接状态
+            if (!是否已连接 && !是否正在连接 && !是否正在重连)
+            {
+                建立连接();
+            }
+        }
+    }
+
+    private void OnApplicationFocus(bool hasFocus)
+    {
+        // 应用失去焦点或获得焦点
+        应用在前台 = hasFocus;
+        if (!hasFocus)
+        {
+            Debug.Log("[WebSocket] 应用失去焦点");
+        }
+        else
+        {
+            Debug.Log("[WebSocket] 应用获得焦点");
+            // 获得焦点时检查连接状态
+            if (!是否已连接 && !是否正在连接 && !是否正在重连)
+            {
+                建立连接();
+            }
+        }
     }
 
     /// <summary>
@@ -136,6 +192,8 @@ public class SignalR连接管理 : MonoBehaviour
 
             是否已连接 = true;
             是否正在连接 = false;
+            是否正在重连 = false;
+            当前重连次数 = 0; // 重置重连次数
             Debug.Log("WebSocket 连接成功");
 
             // 启动消息接收循环（在后台线程）
@@ -143,6 +201,12 @@ public class SignalR连接管理 : MonoBehaviour
 
             // 延迟注册玩家ID到服务器（确保玩家数据已加载）
             StartCoroutine(延迟注册玩家ID());
+
+            // 启动心跳协程
+            启动心跳();
+
+            // 重连成功后同步数据
+            StartCoroutine(重连后同步数据());
         }
         catch (Exception ex)
         {
@@ -150,6 +214,12 @@ public class SignalR连接管理 : MonoBehaviour
             是否正在连接 = false;
             webSocket?.Dispose();
             webSocket = null;
+            
+            // 连接失败后尝试重连
+            if (!是否正在重连 && 应用在前台)
+            {
+                尝试重连();
+            }
         }
     }
 
@@ -217,7 +287,17 @@ public class SignalR连接管理 : MonoBehaviour
 
             是否已连接 = false;
             当前家族ID = -1;
+            
+            // 停止心跳
+            停止心跳();
+            
             Debug.Log("WebSocket 连接已断开");
+            
+            // 断开后尝试重连（如果应用在前台）
+            if (应用在前台 && !是否正在重连)
+            {
+                尝试重连();
+            }
         }
         catch (Exception ex)
         {
@@ -319,7 +399,24 @@ public class SignalR连接管理 : MonoBehaviour
         finally
         {
             是否已连接 = false;
+            
+            // 接收循环结束时，触发重连（如果应用在前台）
+            // 注意：这里在后台线程，需要通过协程在主线程执行
+            if (应用在前台 && !是否正在重连)
+            {
+                // 使用协程在主线程执行重连
+                StartCoroutine(延迟重连());
+            }
         }
+    }
+
+    /// <summary>
+    /// 延迟重连协程（用于在后台线程触发重连）
+    /// </summary>
+    private System.Collections.IEnumerator 延迟重连()
+    {
+        yield return null; // 等待一帧，确保在主线程
+        尝试重连();
     }
 
     /// <summary>
@@ -769,6 +866,173 @@ public class SignalR连接管理 : MonoBehaviour
                 聊天界面.实例.设置禁言状态(true);
             }
         }
+    }
+
+    /// <summary>
+    /// 启动心跳协程
+    /// </summary>
+    private void 启动心跳()
+    {
+        停止心跳(); // 先停止旧的协程
+        上次心跳时间 = Time.time;
+        心跳协程 = StartCoroutine(心跳循环());
+    }
+
+    /// <summary>
+    /// 停止心跳协程
+    /// </summary>
+    private void 停止心跳()
+    {
+        if (心跳协程 != null)
+        {
+            StopCoroutine(心跳协程);
+            心跳协程 = null;
+        }
+    }
+
+    /// <summary>
+    /// 心跳循环协程
+    /// </summary>
+    private System.Collections.IEnumerator 心跳循环()
+    {
+        while (是否已连接 && webSocket != null && webSocket.State == WebSocketState.Open)
+        {
+            yield return new WaitForSeconds(心跳间隔);
+
+            if (是否已连接 && webSocket != null && webSocket.State == WebSocketState.Open)
+            {
+                try
+                {
+                    string 心跳消息 = "{\"type\":\"heartbeat\",\"timestamp\":" + DateTimeOffset.Now.ToUnixTimeMilliseconds() + "}";
+                    _ = 发送消息(心跳消息);
+                    上次心跳时间 = Time.time;
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError($"[WebSocket] 发送心跳失败: {ex.Message}");
+                    // 心跳失败，可能连接已断开
+                    是否已连接 = false;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 尝试重连
+    /// </summary>
+    private void 尝试重连()
+    {
+        if (是否正在重连 || !应用在前台)
+        {
+            return;
+        }
+
+        if (当前重连次数 >= 最大重连次数)
+        {
+            Debug.LogWarning($"[WebSocket] 已达到最大重连次数 ({最大重连次数})，停止重连");
+            return;
+        }
+
+        是否正在重连 = true;
+        当前重连次数++;
+        Debug.Log($"[WebSocket] 开始第 {当前重连次数} 次重连尝试...");
+
+        if (重连协程 != null)
+        {
+            StopCoroutine(重连协程);
+        }
+        重连协程 = StartCoroutine(重连协程方法());
+    }
+
+    /// <summary>
+    /// 重连协程
+    /// </summary>
+    private System.Collections.IEnumerator 重连协程方法()
+    {
+        yield return new WaitForSeconds(重连间隔);
+
+        if (!应用在前台)
+        {
+            是否正在重连 = false;
+            yield break;
+        }
+
+        // 清理旧连接
+        if (webSocket != null)
+        {
+            try
+            {
+                webSocket?.Dispose();
+            }
+            catch { }
+            webSocket = null;
+        }
+
+        // 重新建立连接
+        建立连接();
+        
+        // 等待连接结果
+        yield return new WaitForSeconds(2f);
+
+        if (!是否已连接)
+        {
+            // 连接失败，继续重连
+            是否正在重连 = false;
+            if (当前重连次数 < 最大重连次数)
+            {
+                尝试重连();
+            }
+        }
+        else
+        {
+            // 连接成功
+            是否正在重连 = false;
+        }
+    }
+
+    /// <summary>
+    /// 重连后同步数据
+    /// </summary>
+    private System.Collections.IEnumerator 重连后同步数据()
+    {
+        // 等待玩家数据加载完成
+        yield return new WaitForSeconds(1f);
+
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            yield break;
+        }
+
+        Debug.Log("[WebSocket] 重连后开始同步数据...");
+
+        // 检查是否已登录（只有在已登录状态下才同步数据，避免在登录界面时自动弹出UI）
+        // 如果当前玩家数据不存在，说明还在登录界面，不应该同步数据
+        if (玩家数据管理.实例 == null || 玩家数据管理.实例.当前玩家数据 == null)
+        {
+            Debug.Log("[WebSocket] 未登录状态（玩家数据不存在），跳过数据同步");
+            yield break;
+        }
+
+        // 1. 重新获取玩家数据（静默获取，不自动显示UI）
+        if (玩家数据管理.实例 != null)
+        {
+            玩家数据管理.实例.获取玩家数据(accountId, false); // 传入false，不自动显示UI
+            yield return new WaitForSeconds(0.5f);
+        }
+
+        // 2. 如果玩家有家族，重新加入家族组
+        var 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 != null && 当前玩家.家族 != null && 当前玩家.家族.家族ID > 0)
+        {
+            加入家族组(当前玩家.家族.家族ID);
+            yield return new WaitForSeconds(0.5f);
+        }
+
+        // 3. 刷新UI显示（只在主场景中刷新，避免在登录界面时触发）
+        // 注意：这里不强制刷新，让UI自然更新即可，避免在登录界面时弹出UI
+        // 如果玩家在主场景，UI会自动刷新；如果在登录界面，不应该刷新
+        Debug.Log("[WebSocket] 数据同步完成");
     }
 }
 

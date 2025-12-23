@@ -90,9 +90,11 @@ public class 玩家数据管理 : MonoBehaviour
     /// <summary>
     /// 获取玩家数据（登录成功后调用）
     /// </summary>
-    public void 获取玩家数据(int accountId)
+    /// <param name="accountId">账号ID</param>
+    /// <param name="是否自动显示UI">是否自动显示角色信息界面，默认true（登录时使用），重连时传入false</param>
+    public void 获取玩家数据(int accountId, bool 是否自动显示UI = true)
     {
-        StartCoroutine(发送获取玩家请求(accountId));
+        StartCoroutine(发送获取玩家请求(accountId, 是否自动显示UI));
     }
 
     /// <summary>
@@ -103,7 +105,7 @@ public class 玩家数据管理 : MonoBehaviour
         StartCoroutine(发送创建玩家请求(accountId, 姓名, 性别));
     }
 
-    IEnumerator 发送获取玩家请求(int accountId)
+    IEnumerator 发送获取玩家请求(int accountId, bool 是否自动显示UI = true)
     {
         string json数据 = $"{{\"accountId\":{accountId}}}";
         byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
@@ -153,16 +155,20 @@ public class 玩家数据管理 : MonoBehaviour
                             }
                         }
                         
-                        if (创建界面 != null)
+                        // 只有在需要自动显示UI时才显示界面（登录时显示，重连时不显示）
+                        if (是否自动显示UI)
                         {
-                            创建界面.gameObject.SetActive(false);
-                        }
+                            if (创建界面 != null)
+                            {
+                                创建界面.gameObject.SetActive(false);
+                            }
 
-                        // 显示角色信息界面
-                        if (显示角色信息界面 != null)
-                        {
-                            显示角色信息界面.gameObject.SetActive(true);
-                            显示角色信息界面.显示角色信息(当前玩家数据);
+                            // 显示角色信息界面
+                            if (显示角色信息界面 != null)
+                            {
+                                显示角色信息界面.gameObject.SetActive(true);
+                                显示角色信息界面.显示角色信息(当前玩家数据);
+                            }
                         }
                     }
                     else
