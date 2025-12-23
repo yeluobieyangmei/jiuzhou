@@ -1,5 +1,4 @@
 using System;
-using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Text;
@@ -647,5 +646,31 @@ public class 聊天界面 : MonoBehaviour
 
         request.Dispose();
     }
+}
+
+// =================== 响应数据类（与服务器端对应）===================
+
+[Serializable]
+public class 发送消息响应
+{
+    public bool success;
+    public string message;
+}
+
+[Serializable]
+public class 获取消息响应
+{
+    public bool success;
+    public string message;
+    public List<消息数据> data;
+}
+
+[Serializable]
+public class 消息数据
+{
+    public int playerId;
+    public string playerName;
+    public string message;
+    public string messageTime;
 }
 
