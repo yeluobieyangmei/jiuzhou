@@ -130,6 +130,44 @@ public class 聊天界面 : MonoBehaviour
         刷新显示();
     }
 
+    private void OnEnable()
+    {
+        // 界面重新启用时，检查并重置按钮状态
+        if (冷却倒计时协程 != null)
+        {
+            // 如果协程还在运行，说明界面被禁用时协程被停止了
+            // 检查冷却时间是否已过
+            float 已过时间 = Time.time - 最后发送时间;
+            if (已过时间 >= 发送冷却时间)
+            {
+                // 冷却时间已过，重置状态
+                冷却倒计时协程 = null;
+                重置按钮状态();
+            }
+            else
+            {
+                // 冷却时间未过，重新启动倒计时
+                启动冷却倒计时();
+            }
+        }
+        else
+        {
+            // 没有协程，直接更新UI状态
+            更新发送UI状态();
+        }
+    }
+
+    private void OnDisable()
+    {
+        // 界面被禁用时，停止协程并重置按钮状态
+        if (冷却倒计时协程 != null)
+        {
+            StopCoroutine(冷却倒计时协程);
+            冷却倒计时协程 = null;
+        }
+        重置按钮状态();
+    }
+
     private void OnDestroy()
     {
         if (发送按钮 != null)
@@ -149,6 +187,25 @@ public class 聊天界面 : MonoBehaviour
                 t.onValueChanged.RemoveAllListeners();
             }
         }
+
+        // 确保协程被停止
+        if (冷却倒计时协程 != null)
+        {
+            StopCoroutine(冷却倒计时协程);
+            冷却倒计时协程 = null;
+        }
+    }
+
+    /// <summary>
+    /// 重置按钮状态（文本和可交互状态）
+    /// </summary>
+    private void 重置按钮状态()
+    {
+        if (发送按钮文本 != null)
+        {
+            发送按钮文本.text = "发送";
+        }
+        更新发送UI状态();
     }
 
     /// <summary>
@@ -539,15 +596,28 @@ public class 聊天界面 : MonoBehaviour
 
         发送按钮.interactable = false;
 
-        float 剩余时间 = 发送冷却时间;
+        // 计算剩余时间（考虑界面可能被禁用过的情况）
+        float 已过时间 = Time.time - 最后发送时间;
+        float 剩余时间 = Mathf.Max(0f, 发送冷却时间 - 已过时间);
+
         while (剩余时间 > 0)
         {
+            // 检查对象是否仍然激活
+            if (发送按钮 == null || 发送按钮文本 == null) yield break;
+
             发送按钮文本.text = $"发送({Mathf.CeilToInt(剩余时间)}s)";
             yield return new WaitForSeconds(1f);
-            剩余时间 -= 1f;
+            
+            // 重新计算剩余时间（防止界面被禁用后时间计算错误）
+            已过时间 = Time.time - 最后发送时间;
+            剩余时间 = Mathf.Max(0f, 发送冷却时间 - 已过时间);
         }
 
-        发送按钮文本.text = "发送";
+        // 冷却结束，重置状态
+        if (发送按钮文本 != null)
+        {
+            发送按钮文本.text = "发送";
+        }
         冷却倒计时协程 = null;
         更新发送UI状态();
     }
