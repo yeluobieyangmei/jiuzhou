@@ -1503,6 +1503,30 @@ app.MapPost("/api/createClan", async ([FromBody] CreateClanRequest 请求) =>
             // 提交事务
             await transaction.CommitAsync();
 
+            // 记录家族日志：创建家族
+            string 族长姓名 = "";
+            using var leaderNameCommand = new MySqlCommand(
+                "SELECT name FROM players WHERE id = @player_id",
+                connection
+            );
+            leaderNameCommand.Parameters.AddWithValue("@player_id", 玩家ID);
+            var leaderNameResult = await leaderNameCommand.ExecuteScalarAsync();
+            if (leaderNameResult != null)
+            {
+                族长姓名 = leaderNameResult.ToString() ?? "";
+            }
+            await 记录家族日志(
+                connection,
+                (int)家族ID,
+                "create",
+                玩家ID,
+                族长姓名,
+                null,
+                null,
+                null,
+                $"{族长姓名}创建了家族"
+            );
+
             return Results.Ok(new CreateClanResponse(true, "家族创建成功", (int)家族ID));
         }
         catch
@@ -1805,7 +1829,40 @@ app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
             deleteRolesCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
             await deleteRolesCommand.ExecuteNonQueryAsync();
 
-            // 4.4 删除家族记录（外键会自动处理相关数据）
+            // 4.4 在删除家族之前，先查询家族名称和族长姓名（用于日志和事件消息）
+            string 家族名称 = "";
+            string 族长姓名 = "";
+            using var clanInfoCommand = new MySqlCommand(
+                @"SELECT c.name, p.name 
+                  FROM clans c
+                  LEFT JOIN players p ON c.leader_id = p.id
+                  WHERE c.id = @clan_id",
+                connection,
+                transaction
+            );
+            clanInfoCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+            using var clanInfoReader = await clanInfoCommand.ExecuteReaderAsync();
+            if (await clanInfoReader.ReadAsync())
+            {
+                家族名称 = clanInfoReader.IsDBNull(0) ? "" : clanInfoReader.GetString(0);
+                族长姓名 = clanInfoReader.IsDBNull(1) ? "" : clanInfoReader.GetString(1);
+            }
+            clanInfoReader.Close();
+
+            // 4.5 在删除家族之前记录日志（必须在事务中，因为需要访问clans表）
+            await 记录家族日志(
+                connection,
+                家族ID.Value,
+                "disband",
+                玩家ID,
+                族长姓名,
+                null,
+                null,
+                null,
+                $"{族长姓名}解散了家族"
+            );
+
+            // 4.6 删除家族记录（外键会自动处理相关数据）
             using var deleteClanCommand = new MySqlCommand(
                 "DELETE FROM clans WHERE id = @clan_id",
                 connection,
@@ -1816,25 +1873,6 @@ app.MapPost("/api/disbandClan", async ([FromBody] DisbandClanRequest 请求) =>
 
             // 提交事务
             await transaction.CommitAsync();
-
-            // 查询家族名称和族长姓名（用于事件消息）
-            string 家族名称 = "";
-            string 族长姓名 = "";
-            using var clanInfoCommand = new MySqlCommand(
-                @"SELECT c.name, p.name 
-                  FROM clans c
-                  LEFT JOIN players p ON c.leader_id = p.id
-                  WHERE c.id = @clan_id",
-                connection
-            );
-            clanInfoCommand.Parameters.AddWithValue("@clan_id", 家族ID.Value);
-            using var clanInfoReader = await clanInfoCommand.ExecuteReaderAsync();
-            if (await clanInfoReader.ReadAsync())
-            {
-                家族名称 = clanInfoReader.IsDBNull(0) ? "" : clanInfoReader.GetString(0);
-                族长姓名 = clanInfoReader.IsDBNull(1) ? "" : clanInfoReader.GetString(1);
-            }
-            clanInfoReader.Close();
 
             // 通过 SignalR 广播事件：家族解散（向所有家族成员广播）
             var hubContext = app.Services.GetRequiredService<IHubContext<GameHub>>();
@@ -1996,6 +2034,20 @@ app.MapPost("/api/donateClan", async ([FromBody] DonateClanRequest 请求) =>
             // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
             await WebSocketConnectionManager.BroadcastAsync(donateEvent);
 
+            // 记录家族日志：捐献
+            string 捐献详情 = $"{{\"amount\":{捐献消耗铜钱},\"funds_added\":100,\"prosperity_added\":10}}";
+            await 记录家族日志(
+                connection,
+                家族ID.Value,
+                "donate",
+                玩家ID,
+                玩家姓名,
+                null,
+                null,
+                捐献详情,
+                $"{玩家姓名}捐献了{捐献消耗铜钱}铜钱，家族资金+100，繁荣值+10"
+            );
+
             return Results.Ok(new DonateClanResponse(true, "捐献成功！家族资金+100，繁荣值+10", false));
         }
         catch
@@ -2008,6 +2060,60 @@ app.MapPost("/api/donateClan", async ([FromBody] DonateClanRequest 请求) =>
     catch (Exception ex)
     {
         return Results.Ok(new DonateClanResponse(false, "服务器错误: " + ex.Message, false));
+    }
+});
+
+// =================== 获取家族日志接口：POST /api/getClanLogs ===================
+
+app.MapPost("/api/getClanLogs", async ([FromBody] GetClanLogsRequest 请求) =>
+{
+    try
+    {
+        if (请求.ClanId <= 0)
+        {
+            return Results.Ok(new GetClanLogsResponse(false, "家族ID无效", new List<ClanLogData>()));
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询家族日志，按时间倒序排列（最新的在前）
+        using var command = new MySqlCommand(
+            @"SELECT id, clan_id, operation_type, operator_id, operator_name, 
+                     target_player_id, target_player_name, details, description, created_at
+              FROM clan_logs 
+              WHERE clan_id = @clan_id 
+              ORDER BY created_at DESC 
+              LIMIT 300",
+            connection
+        );
+        command.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+
+        var 日志列表 = new List<ClanLogData>();
+        using var reader = await command.ExecuteReaderAsync();
+
+        while (await reader.ReadAsync())
+        {
+            日志列表.Add(new ClanLogData
+            {
+                Id = reader.GetInt32(0),
+                ClanId = reader.GetInt32(1),
+                OperationType = reader.GetString(2),
+                OperatorId = reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                OperatorName = reader.IsDBNull(4) ? null : reader.GetString(4),
+                TargetPlayerId = reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                TargetPlayerName = reader.IsDBNull(6) ? null : reader.GetString(6),
+                Details = reader.IsDBNull(7) ? null : reader.GetString(7),
+                Description = reader.GetString(8),
+                CreatedAt = reader.GetDateTime(9)
+            });
+        }
+
+        return Results.Ok(new GetClanLogsResponse(true, "获取成功", 日志列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetClanLogsResponse(false, "服务器错误: " + ex.Message, new List<ClanLogData>()));
     }
 });
 
@@ -2194,6 +2300,19 @@ app.MapPost("/api/joinClan", async ([FromBody] JoinClanRequest 请求) =>
             // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
             await WebSocketConnectionManager.BroadcastAsync(joinEvent);
 
+            // 记录家族日志：加入家族
+            await 记录家族日志(
+                connection,
+                家族ID,
+                "join",
+                玩家ID,
+                玩家姓名,
+                null,
+                null,
+                null,
+                $"{玩家姓名}加入了家族"
+            );
+
             return Results.Ok(new JoinClanResponse(true, "加入家族成功！"));
         }
         catch
@@ -2323,6 +2442,19 @@ app.MapPost("/api/leaveClan", async ([FromBody] LeaveClanRequest 请求) =>
 
             // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
             await WebSocketConnectionManager.BroadcastAsync(leaveEvent);
+
+            // 记录家族日志：离开家族
+            await 记录家族日志(
+                connection,
+                家族ID.Value,
+                "leave",
+                玩家ID,
+                玩家姓名,
+                null,
+                null,
+                null,
+                $"{玩家姓名}离开了家族"
+            );
 
             return Results.Ok(new LeaveClanResponse(true, "退出家族成功！"));
         }
@@ -2529,6 +2661,19 @@ app.MapPost("/api/kickClanMember", async ([FromBody] KickClanMemberRequest 请�
 
             // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
             await WebSocketConnectionManager.BroadcastAsync(kickEvent);
+
+            // 记录家族日志：踢出成员
+            await 记录家族日志(
+                connection,
+                操作者家族ID.Value,
+                "kick",
+                操作者ID,
+                操作者姓名,
+                请求.TargetPlayerId,
+                目标玩家姓名,
+                null,
+                $"{操作者姓名}将{目标玩家姓名}踢出家族"
+            );
 
             // 发送系统消息给被踢出的玩家
             var systemMessage = new 待处理消息
@@ -3070,6 +3215,31 @@ app.MapPost("/api/appointClanRole", async ([FromBody] AppointClanRoleRequest 请
 
             // 通过自建 WebSocket 通道广播相同事件（JSON 格式）
             await WebSocketConnectionManager.BroadcastAsync(appointEvent);
+
+            // 记录家族日志：职位任命
+            string 任命详情 = "";
+            if (被顶替玩家ID.HasValue && 被顶替玩家ID.Value > 0)
+            {
+                任命详情 = $"{{\"role\":\"{请求.Role}\",\"old_role\":\"成员\",\"replaced_player_id\":{被顶替玩家ID.Value},\"replaced_player_name\":\"{被顶替玩家姓名}\"}}";
+            }
+            else
+            {
+                任命详情 = $"{{\"role\":\"{请求.Role}\",\"old_role\":\"成员\"}}";
+            }
+            string 任命描述 = 被顶替玩家ID.HasValue && 被顶替玩家ID.Value > 0
+                ? $"{操作者姓名}任命{目标玩家姓名}为{请求.Role}（顶替了{被顶替玩家姓名}）"
+                : $"{操作者姓名}任命{目标玩家姓名}为{请求.Role}";
+            await 记录家族日志(
+                connection,
+                请求.ClanId,
+                "appoint",
+                操作者ID,
+                操作者姓名,
+                请求.PlayerId,
+                目标玩家姓名,
+                任命详情,
+                任命描述
+            );
 
             string 成功消息 = 当前职位玩家列表.Count >= 最大数量 
                 ? $"成功任命玩家为{请求.Role}（已顶替原职位玩家）" 
@@ -3860,6 +4030,67 @@ static string 计算SHA256(string 输入)
         sb.Append(b.ToString("x2")); // 转成小写十六进制
     }
     return sb.ToString();
+}
+
+// =================== 家族日志记录辅助函数 ===================
+
+/// <summary>
+/// 记录家族日志并限制每个家族最多300条日志
+/// </summary>
+static async Task 记录家族日志(
+    MySqlConnection connection,
+    int clanId,
+    string operationType,
+    int? operatorId,
+    string? operatorName,
+    int? targetPlayerId,
+    string? targetPlayerName,
+    string? details,
+    string description)
+{
+    try
+    {
+        // 1. 插入新日志
+        using var insertCommand = new MySqlCommand(
+            @"INSERT INTO clan_logs (clan_id, operation_type, operator_id, operator_name, 
+                                    target_player_id, target_player_name, details, description)
+              VALUES (@clan_id, @operation_type, @operator_id, @operator_name, 
+                      @target_player_id, @target_player_name, @details, @description)",
+            connection
+        );
+        insertCommand.Parameters.AddWithValue("@clan_id", clanId);
+        insertCommand.Parameters.AddWithValue("@operation_type", operationType);
+        insertCommand.Parameters.AddWithValue("@operator_id", operatorId.HasValue ? (object)operatorId.Value : DBNull.Value);
+        insertCommand.Parameters.AddWithValue("@operator_name", string.IsNullOrEmpty(operatorName) ? (object)DBNull.Value : operatorName);
+        insertCommand.Parameters.AddWithValue("@target_player_id", targetPlayerId.HasValue ? (object)targetPlayerId.Value : DBNull.Value);
+        insertCommand.Parameters.AddWithValue("@target_player_name", string.IsNullOrEmpty(targetPlayerName) ? (object)DBNull.Value : targetPlayerName);
+        insertCommand.Parameters.AddWithValue("@details", string.IsNullOrEmpty(details) ? (object)DBNull.Value : details);
+        insertCommand.Parameters.AddWithValue("@description", description);
+        
+        await insertCommand.ExecuteNonQueryAsync();
+
+        // 2. 删除超过300条的最旧记录（每个家族独立限制）
+        using var deleteCommand = new MySqlCommand(
+            @"DELETE FROM clan_logs 
+              WHERE clan_id = @clan_id
+              AND id NOT IN (
+                  SELECT id FROM (
+                      SELECT id FROM clan_logs 
+                      WHERE clan_id = @clan_id 
+                      ORDER BY created_at DESC 
+                      LIMIT 300
+                  ) AS temp
+              )",
+            connection
+        );
+        deleteCommand.Parameters.AddWithValue("@clan_id", clanId);
+        await deleteCommand.ExecuteNonQueryAsync();
+    }
+    catch (Exception ex)
+    {
+        日志记录器.错误($"[家族日志] 记录日志失败: {ex.Message}");
+        // 不抛出异常，避免影响主业务逻辑
+    }
 }
 
 // =================== 消息处理函数 ===================
@@ -4775,6 +5006,50 @@ public class SystemMessageEvent : GameEventMessage
     public SystemMessageEvent()
     {
         EventType = "SystemMessage";
+    }
+}
+
+// =================== 家族日志相关请求和响应类 ===================
+
+/// <summary>
+/// 获取家族日志请求
+/// </summary>
+public class GetClanLogsRequest
+{
+    public int ClanId { get; set; }
+}
+
+/// <summary>
+/// 家族日志数据
+/// </summary>
+public class ClanLogData
+{
+    public int Id { get; set; }
+    public int ClanId { get; set; }
+    public string OperationType { get; set; } = "";
+    public int? OperatorId { get; set; }
+    public string? OperatorName { get; set; }
+    public int? TargetPlayerId { get; set; }
+    public string? TargetPlayerName { get; set; }
+    public string? Details { get; set; }
+    public string Description { get; set; } = "";
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>
+/// 获取家族日志响应
+/// </summary>
+public class GetClanLogsResponse
+{
+    public bool Success { get; set; }
+    public string Message { get; set; } = "";
+    public List<ClanLogData> Logs { get; set; } = new List<ClanLogData>();
+
+    public GetClanLogsResponse(bool success, string message, List<ClanLogData> logs)
+    {
+        Success = success;
+        Message = message;
+        Logs = logs;
     }
 }
 

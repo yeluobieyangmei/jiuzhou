@@ -36,6 +36,7 @@ public class 家族信息显示 : MonoBehaviour
 
     public 家族列表显示 家族列表显示;
     public 玩家列表显示 玩家列表显示;
+    public 家族日志显示 家族日志显示;
 
     //public 显示家族列表 显示家族列表;  显示家族列表尚未实现，此处先写补上格式 后续完善
 
@@ -43,6 +44,11 @@ public class 家族信息显示 : MonoBehaviour
     {
         // 如果UI组件未在Inspector中赋值，尝试从子对象自动获取（兼容原有方式）
         自动获取UI组件();
+    }
+
+    public void 点击查看日志()
+    {
+        家族日志显示.gameObject.SetActive(true);
     }
 
     /// <summary>

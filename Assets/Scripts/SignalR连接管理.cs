@@ -787,6 +787,13 @@ public class SignalR连接管理 : MonoBehaviour
     {
         if (evt == null || string.IsNullOrEmpty(evt.channel)) return;
 
+        // 检查是否是当前玩家自己发送的消息，如果是则忽略（因为已经在发送成功后立即在本地显示了）
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 != null && evt.playerId == 当前玩家.ID)
+        {
+            return; // 忽略自己发送的消息，避免重复显示
+        }
+
         // 将消息添加到聊天界面
         if (聊天界面.实例 != null)
         {
