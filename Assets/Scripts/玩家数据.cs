@@ -21,6 +21,7 @@ namespace 玩家数据结构
     {
         public int ID;
         public int 等级;
+        public int 经验值;  // 当前经验值
         public int 铜钱;
         public int 黄金;
         public string 姓名;
@@ -33,10 +34,39 @@ namespace 玩家数据结构
         public 家族信息库 家族;
         public 官职枚举 官职 { get; set; }
 
+        // 经验值相关常量
+        private const int 基础经验值 = 1000;  // 1级升2级所需经验
+        private const int 每级经验增长 = 500;  // 每升1级，升级所需经验增加500
+
+        /// <summary>
+        /// 计算升级到下一级所需的总经验值
+        /// 公式：基础经验值 + (当前等级 - 1) * 每级经验增长
+        /// 例如：1级升2级需要1000，2级升3级需要1500，3级升4级需要2000...
+        /// </summary>
+        public int 获取升级所需经验()
+        {
+            if (等级 < 1) return 基础经验值;
+            return 基础经验值 + (等级 - 1) * 每级经验增长;
+        }
+
+        /// <summary>
+        /// 获取当前经验值百分比（用于显示）
+        /// 返回0.00到100.00之间的值
+        /// </summary>
+        public float 获取经验值百分比()
+        {
+            int 升级所需经验 = 获取升级所需经验();
+            if (升级所需经验 <= 0) return 100f; // 如果升级所需经验为0，返回100%
+            
+            float 百分比 = (float)经验值 / 升级所需经验 * 100f;
+            return Mathf.Clamp(百分比, 0f, 100f); // 限制在0-100之间
+        }
+
         public void 初始化一个玩家(string 姓名, string 性别)
         {
             this.ID = 全局变量.所有玩家数据表.Count;
             this.等级 = 1;
+            this.经验值 = 0;  // 初始经验值为0
             this.铜钱 = 50000000;
             this.黄金 = 2000000;
             this.姓名 = 姓名;

@@ -274,6 +274,7 @@ public class 玩家数据管理 : MonoBehaviour
         当前玩家数据.姓名 = 服务端数据.name;
         当前玩家数据.性别 = 服务端数据.gender;
         当前玩家数据.等级 = 服务端数据.level;
+        当前玩家数据.经验值 = 服务端数据.experience;  // 经验值
         当前玩家数据.称号名 = 服务端数据.titleName;
         当前玩家数据.铜钱 = 服务端数据.copperMoney;
         当前玩家数据.黄金 = 服务端数据.gold;
@@ -685,6 +686,7 @@ public class 服务端玩家数据
     public string name;
     public string gender;
     public int level;
+    public int experience;  // 当前经验值
     public string titleName;
     public string office;
     public int copperMoney;

@@ -728,7 +728,7 @@ app.MapPost("/api/getPlayer", async ([FromBody] GetPlayerRequest 请求) =>
         // 查询玩家信息（LEFT JOIN 关联属性、国家、家族）
         string sql = @"
             SELECT 
-                p.id, p.name, p.gender, p.level, p.title_name, p.office,
+                p.id, p.name, p.gender, p.level, p.experience, p.title_name, p.office,
                 p.copper_money, p.gold, p.country_id, p.clan_id, p.clan_contribution,
                 pa.max_hp, pa.current_hp, pa.attack, pa.defense, pa.crit_rate,
                 c.id as country_id_full, c.name as country_name, c.code as country_code,
@@ -748,41 +748,42 @@ app.MapPost("/api/getPlayer", async ([FromBody] GetPlayerRequest 请求) =>
         if (await reader.ReadAsync())
         {
             // 玩家存在，构建返回数据
-            // SQL 查询顺序：p.id(0), p.name(1), p.gender(2), p.level(3), p.title_name(4), p.office(5),
-            // p.copper_money(6), p.gold(7), p.country_id(8), p.clan_id(9), p.clan_contribution(10),
-            // pa.max_hp(11), pa.current_hp(12), pa.attack(13), pa.defense(14), pa.crit_rate(15),
-            // c.id(16), c.name(17), c.code(18), cl.id(19), cl.name(20)
+            // SQL 查询顺序：p.id(0), p.name(1), p.gender(2), p.level(3), p.experience(4), p.title_name(5), p.office(6),
+            // p.copper_money(7), p.gold(8), p.country_id(9), p.clan_id(10), p.clan_contribution(11),
+            // pa.max_hp(12), pa.current_hp(13), pa.attack(14), pa.defense(15), pa.crit_rate(16),
+            // c.id(17), c.name(18), c.code(19), cl.id(20), cl.name(21)
             var 玩家数据 = new PlayerData
             {
                 Id = reader.GetInt32(0),
                 Name = reader.GetString(1),
                 Gender = reader.GetString(2),
                 Level = reader.GetInt32(3),
-                TitleName = reader.GetString(4),
-                Office = reader.GetString(5),
-                CopperMoney = reader.GetInt32(6),
-                Gold = reader.GetInt32(7),
-                CountryId = reader.IsDBNull(8) ? -1 : reader.GetInt32(8),  // Unity JsonUtility 不支持可空类型，用 -1 表示 null
-                ClanId = reader.IsDBNull(9) ? -1 : reader.GetInt32(9),    // Unity JsonUtility 不支持可空类型，用 -1 表示 null
-                ClanContribution = reader.GetInt32(10),  // 家族贡献值
+                Experience = reader.GetInt32(4),  // 经验值
+                TitleName = reader.GetString(5),
+                Office = reader.GetString(6),
+                CopperMoney = reader.GetInt32(7),
+                Gold = reader.GetInt32(8),
+                CountryId = reader.IsDBNull(9) ? -1 : reader.GetInt32(9),  // Unity JsonUtility 不支持可空类型，用 -1 表示 null
+                ClanId = reader.IsDBNull(10) ? -1 : reader.GetInt32(10),    // Unity JsonUtility 不支持可空类型，用 -1 表示 null
+                ClanContribution = reader.GetInt32(11),  // 家族贡献值
                 Attributes = new PlayerAttributesData
                 {
-                    MaxHp = reader.GetInt32(11),
-                    CurrentHp = reader.GetInt32(12),
-                    Attack = reader.GetInt32(13),
-                    Defense = reader.GetInt32(14),
-                    CritRate = reader.GetFloat(15)
+                    MaxHp = reader.GetInt32(12),
+                    CurrentHp = reader.GetInt32(13),
+                    Attack = reader.GetInt32(14),
+                    Defense = reader.GetInt32(15),
+                    CritRate = reader.GetFloat(16)
                 },
-                Country = reader.IsDBNull(16) ? null : new CountryData
+                Country = reader.IsDBNull(17) ? null : new CountryData
                 {
-                    Id = reader.GetInt32(16),
-                    Name = reader.GetString(17),
-                    Code = reader.GetString(18)
+                    Id = reader.GetInt32(17),
+                    Name = reader.GetString(18),
+                    Code = reader.GetString(19)
                 },
-                Clan = reader.IsDBNull(19) ? null : new ClanData
+                Clan = reader.IsDBNull(20) ? null : new ClanData
                 {
-                    Id = reader.GetInt32(19),
-                    Name = reader.GetString(20)
+                    Id = reader.GetInt32(20),
+                    Name = reader.GetString(21)
                 }
             };
 
@@ -867,8 +868,8 @@ app.MapPost("/api/createPlayer", async ([FromBody] CreatePlayerRequest 请求) =
         {
             // 插入玩家数据
             using var insertPlayerCommand = new MySqlCommand(
-                @"INSERT INTO players (account_id, name, gender, level, title_name, office, copper_money, gold)
-                  VALUES (@account_id, @name, @gender, 1, '无', '国民', 50000000, 2000000)",
+                @"INSERT INTO players (account_id, name, gender, level, experience, title_name, office, copper_money, gold)
+                  VALUES (@account_id, @name, @gender, 1, 0, '无', '国民', 50000000, 2000000)",
                 connection,
                 transaction
             );
@@ -4464,6 +4465,7 @@ public class PlayerData
     public string Name { get; set; } = "";
     public string Gender { get; set; } = "";
     public int Level { get; set; }
+    public int Experience { get; set; } = 0;  // 当前经验值
     public string TitleName { get; set; } = "";
     public string Office { get; set; } = "";
     public int CopperMoney { get; set; }
