@@ -5856,7 +5856,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: Enter text...
+  m_Text: "\u8BF7\u8F93\u5165\u5185\u5BB9~~"
 --- !u!222 &861027577
 CanvasRenderer:
   m_ObjectHideFlags: 0
@@ -16319,7 +16319,7 @@ MonoBehaviour:
     m_HorizontalOverflow: 0
     m_VerticalOverflow: 0
     m_LineSpacing: 1
-  m_Text: "\u56FD\u5BB6\u516C\u544A\uFF1A"
+  m_Text: "\u5BB6\u65CF\u516C\u544A\uFF1A"
 --- !u!224 &1008152145899025646
 RectTransform:
   m_ObjectHideFlags: 0
