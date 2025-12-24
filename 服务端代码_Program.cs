@@ -1344,6 +1344,56 @@ app.MapGet("/api/getAllPlayers", async () =>
     }
 });
 
+// =================== 获取怪物模板接口：GET /api/getMonsterTemplates ===================
+
+app.MapGet("/api/getMonsterTemplates", async () =>
+{
+    try
+    {
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 查询所有怪物模板（只返回普通怪物，不返回Boss）
+        string sql = @"
+            SELECT 
+                id, monster_type, name, base_level, base_hp, base_attack, base_defense,
+                base_copper_money, base_experience, level_growth_rate, is_boss, description
+            FROM monster_templates
+            WHERE is_boss = FALSE
+            ORDER BY monster_type";
+
+        using var command = new MySqlCommand(sql, connection);
+        using var reader = await command.ExecuteReaderAsync();
+
+        var 模板列表 = new List<MonsterTemplateData>();
+        while (await reader.ReadAsync())
+        {
+            var 模板 = new MonsterTemplateData
+            {
+                Id = reader.GetInt32(0),
+                MonsterType = reader.GetInt32(1),
+                Name = reader.GetString(2),
+                BaseLevel = reader.GetInt32(3),
+                BaseHp = reader.GetInt32(4),
+                BaseAttack = reader.GetInt32(5),
+                BaseDefense = reader.GetInt32(6),
+                BaseCopperMoney = reader.GetInt32(7),
+                BaseExperience = reader.GetInt32(8),
+                LevelGrowthRate = reader.GetDecimal(9),
+                IsBoss = reader.GetBoolean(10),
+                Description = reader.IsDBNull(11) ? "" : reader.GetString(11)
+            };
+            模板列表.Add(模板);
+        }
+
+        return Results.Ok(new GetMonsterTemplatesResponse(true, "获取成功", 模板列表));
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new GetMonsterTemplatesResponse(false, "服务器错误: " + ex.Message, new List<MonsterTemplateData>()));
+    }
+});
+
 // =================== 创建家族接口：POST /api/createClan ===================
 
 app.MapPost("/api/createClan", async ([FromBody] CreateClanRequest 请求) =>
@@ -4498,6 +4548,44 @@ public class ClanData
 {
     public int Id { get; set; }
     public string Name { get; set; } = "";
+}
+
+// =================== 怪物模板相关数据类 ===================
+
+/// <summary>
+/// 怪物模板数据
+/// </summary>
+public class MonsterTemplateData
+{
+    public int Id { get; set; }
+    public int MonsterType { get; set; }
+    public string Name { get; set; } = "";
+    public int BaseLevel { get; set; }
+    public int BaseHp { get; set; }
+    public int BaseAttack { get; set; }
+    public int BaseDefense { get; set; }
+    public int BaseCopperMoney { get; set; }
+    public int BaseExperience { get; set; }
+    public decimal LevelGrowthRate { get; set; }
+    public bool IsBoss { get; set; }
+    public string Description { get; set; } = "";
+}
+
+/// <summary>
+/// 获取怪物模板响应
+/// </summary>
+public class GetMonsterTemplatesResponse
+{
+    public bool Success { get; set; }
+    public string Message { get; set; } = "";
+    public List<MonsterTemplateData> Templates { get; set; } = new();
+
+    public GetMonsterTemplatesResponse(bool success, string message, List<MonsterTemplateData> templates)
+    {
+        Success = success;
+        Message = message;
+        Templates = templates;
+    }
 }
 
 public class CountrySummary
