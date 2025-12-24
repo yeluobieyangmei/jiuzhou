@@ -153,7 +153,7 @@ public class 家族日志显示 : MonoBehaviour
             克隆对象.SetActive(true);
             
             // 获取Text组件并设置内容
-            Text 文本组件 = 克隆对象.transform.GetChild(0).GetComponent<Text>();
+            Text 文本组件 = 克隆对象.GetComponent<Text>();
             if (文本组件 != null)
             {
                 // 格式化时间：HH:mm
