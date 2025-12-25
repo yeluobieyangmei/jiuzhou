@@ -801,6 +801,197 @@ app.MapPost("/api/getPlayer", async ([FromBody] GetPlayerRequest 请求) =>
     }
 });
 
+// =================== 战斗结果接口：POST /api/battleResult ===================
+
+app.MapPost("/api/battleResult", async ([FromBody] BattleResultRequest 请求) =>
+{
+    try
+    {
+        if (请求.PlayerId <= 0)
+        {
+            return Results.Ok(new BattleResultResponse(false, "玩家ID无效", 0, 0, 0, false, 0));
+        }
+
+        if (!请求.Victory)
+        {
+            // 战斗失败，只返回当前数据，不更新
+            using var failConnection = new MySqlConnection(数据库连接字符串);
+            await failConnection.OpenAsync();
+            
+            using var selectCommand = new MySqlCommand(
+                "SELECT experience, copper_money, current_hp FROM players p LEFT JOIN player_attributes pa ON p.id = pa.player_id WHERE p.id = @player_id",
+                failConnection
+            );
+            selectCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+            
+            using var reader = await selectCommand.ExecuteReaderAsync();
+            if (await reader.ReadAsync())
+            {
+                int 当前经验值 = reader.GetInt32(0);
+                int 当前铜钱 = reader.GetInt32(1);
+                int 当前生命值 = reader.GetInt32(2);
+                reader.Close();
+                return Results.Ok(new BattleResultResponse(true, "战斗失败", 当前经验值, 当前铜钱, 当前生命值, false, 0));
+            }
+            else
+            {
+                return Results.Ok(new BattleResultResponse(false, "玩家不存在", 0, 0, 0, false, 0));
+            }
+        }
+
+        using var connection = new MySqlConnection(数据库连接字符串);
+        await connection.OpenAsync();
+
+        // 开始事务
+        using var transaction = await connection.BeginTransactionAsync();
+
+        try
+        {
+            // 1. 查询玩家当前数据
+            using var selectCommand = new MySqlCommand(
+                @"SELECT p.level, p.experience, p.copper_money, pa.current_hp, pa.max_hp, pa.attack, pa.defense
+                  FROM players p
+                  LEFT JOIN player_attributes pa ON p.id = pa.player_id
+                  WHERE p.id = @player_id",
+                connection,
+                transaction
+            );
+            selectCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+
+            using var reader = await selectCommand.ExecuteReaderAsync();
+            if (!await reader.ReadAsync())
+            {
+                reader.Close();
+                await transaction.RollbackAsync();
+                return Results.Ok(new BattleResultResponse(false, "玩家不存在", 0, 0, 0, false, 0));
+            }
+
+            int 当前等级 = reader.GetInt32(0);
+            int 当前经验值 = reader.GetInt32(1);
+            int 当前铜钱 = reader.GetInt32(2);
+            int 当前生命值 = reader.GetInt32(3);
+            int 最大生命值 = reader.GetInt32(4);
+            int 攻击力 = reader.GetInt32(5);
+            int 防御力 = reader.GetInt32(6);
+            reader.Close();
+
+            // 2. 计算新的经验值和铜钱
+            int 新经验值 = 当前经验值 + 请求.Experience;
+            int 新铜钱 = 当前铜钱 + 请求.CopperMoney;
+
+            // 3. 计算升级（使用与客户端相同的公式）
+            // 基础经验值 = 1000，每级经验增长 = 500
+            // 升级到下一级所需经验 = 1000 + (当前等级 - 1) * 500
+            int 基础经验值 = 1000;
+            int 每级经验增长 = 500;
+            bool 升级了 = false;
+            int 新等级 = 当前等级;
+
+            while (新经验值 >= (基础经验值 + (新等级 - 1) * 每级经验增长))
+            {
+                int 升级所需经验 = 基础经验值 + (新等级 - 1) * 每级经验增长;
+                新经验值 -= 升级所需经验;
+                新等级++;
+                升级了 = true;
+            }
+
+            // 4. 更新玩家数据
+            using var updatePlayerCommand = new MySqlCommand(
+                @"UPDATE players 
+                  SET level = @level, experience = @experience, copper_money = @copper_money
+                  WHERE id = @player_id",
+                connection,
+                transaction
+            );
+            updatePlayerCommand.Parameters.AddWithValue("@level", 新等级);
+            updatePlayerCommand.Parameters.AddWithValue("@experience", 新经验值);
+            updatePlayerCommand.Parameters.AddWithValue("@copper_money", 新铜钱);
+            updatePlayerCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+            await updatePlayerCommand.ExecuteNonQueryAsync();
+
+            // 5. 如果升级了，重新计算属性
+            int 新最大生命值 = 最大生命值;
+            int 新攻击力 = 攻击力;
+            int 新防御力 = 防御力;
+            int 新当前生命值 = 当前生命值;
+
+            if (升级了)
+            {
+                // 重新计算属性（根据新等级）
+                新最大生命值 = 新等级 * 200;
+                新攻击力 = 100000; // 攻击力固定为100000
+                新防御力 = 新等级 * 2;
+                // 升级后恢复满血
+                新当前生命值 = 新最大生命值;
+
+                // 更新玩家属性
+                using var updateAttrCommand = new MySqlCommand(
+                    @"UPDATE player_attributes 
+                      SET max_hp = @max_hp, current_hp = @current_hp, attack = @attack, defense = @defense
+                      WHERE player_id = @player_id",
+                    connection,
+                    transaction
+                );
+                updateAttrCommand.Parameters.AddWithValue("@max_hp", 新最大生命值);
+                updateAttrCommand.Parameters.AddWithValue("@current_hp", 新当前生命值);
+                updateAttrCommand.Parameters.AddWithValue("@attack", 新攻击力);
+                updateAttrCommand.Parameters.AddWithValue("@defense", 新防御力);
+                updateAttrCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+                await updateAttrCommand.ExecuteNonQueryAsync();
+            }
+            else
+            {
+                // 未升级，使用客户端发送的战斗后的当前生命值
+                新当前生命值 = 请求.CurrentHp;
+                // 确保当前生命值不超过最大生命值
+                if (新当前生命值 > 最大生命值)
+                {
+                    新当前生命值 = 最大生命值;
+                }
+                // 确保当前生命值不为负数
+                if (新当前生命值 < 0)
+                {
+                    新当前生命值 = 0;
+                }
+
+                // 更新当前生命值
+                using var updateHpCommand = new MySqlCommand(
+                    @"UPDATE player_attributes 
+                      SET current_hp = @current_hp
+                      WHERE player_id = @player_id",
+                    connection,
+                    transaction
+                );
+                updateHpCommand.Parameters.AddWithValue("@current_hp", 新当前生命值);
+                updateHpCommand.Parameters.AddWithValue("@player_id", 请求.PlayerId);
+                await updateHpCommand.ExecuteNonQueryAsync();
+            }
+
+            // 提交事务
+            await transaction.CommitAsync();
+
+            return Results.Ok(new BattleResultResponse(
+                true,
+                "战斗结果处理成功",
+                新经验值,
+                新铜钱,
+                新当前生命值,
+                升级了,
+                新等级
+            ));
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new BattleResultResponse(false, "服务器错误: " + ex.Message, 0, 0, 0, false, 0));
+    }
+});
+
 // =================== 创建玩家接口：POST /api/createPlayer ===================
 
 app.MapPost("/api/createPlayer", async ([FromBody] CreatePlayerRequest 请求) =>
@@ -4393,6 +4584,10 @@ public record HeartbeatRequest(int AccountId);
 
 public record HeartbeatResponse(bool Success, string Message, int ClanId);
 
+public record BattleResultRequest(int PlayerId, int MonsterType, int Experience, int CopperMoney, int CurrentHp, bool Victory);
+
+public record BattleResultResponse(bool Success, string Message, int NewExperience, int NewCopperMoney, int NewCurrentHp, bool LevelUp, int NewLevel);
+
 public record GetClanInfoRequest(int ClanId, int PlayerId);
 
 public record GetClanInfoResponse(bool Success, string Message, ClanInfoData? Data);
@@ -4587,6 +4782,8 @@ public class GetMonsterTemplatesResponse
         Templates = templates;
     }
 }
+
+// =================== 战斗结果相关数据类 ===================
 
 public class CountrySummary
 {
