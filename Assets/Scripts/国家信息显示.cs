@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -31,6 +32,7 @@ public class 国家信息显示 : MonoBehaviour
 
     [Header("接口地址")]
     private string 获取国家信息地址 = "http://43.139.181.191:5000/api/getCountryInfo";
+    private string 宣战接口地址 = "http://43.139.181.191:5000/api/declareWar";
 
     public string 王城战说明文本 = "王城战宣战将扣除1万家族资金作为报名费，王城战将由 A B两个家族争夺，战斗开始⚔后双方点击'进入主战场'按钮进入战场，进入战场后Boss每3秒可以攻击一次，等待期间可击杀对方家族玩家获取积分，最终击败Boss的家族获得Boos的归属，每3秒获得50积分。当其中任意一方积分达到1万时，则该方家族获胜，王城战结束，该家族长自动登顶王位。";
 
@@ -182,6 +184,13 @@ public class 国家信息显示 : MonoBehaviour
                 {
                     成员.text = $"成     员：{响应.memberCount}";
                     排名.text = $"排     名：第{响应.rank}名";
+                    
+                    // 同步宣战家族信息
+                    玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+                    if (当前玩家 != null && 当前玩家.国家 != null)
+                    {
+                        同步宣战家族信息(当前玩家.国家, 响应);
+                    }
                 }
                 else
                 {
@@ -232,6 +241,208 @@ public class 国家信息显示 : MonoBehaviour
         玩家列表显示.当前国家 = 当前玩家.国家; // 设置当前国家
         玩家列表显示.gameObject.SetActive(true);
     }
+
+    public void 点击宣战按钮()
+    {
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        国家信息库 当前国家 = 当前玩家.国家;
+
+        // 检查是否已经宣战
+        if (当前国家.宣战家族1 != null && 当前国家.宣战家族2 != null)
+        {
+            // 已经宣战，显示宣战信息
+            通用提示框.显示($"当前已有宣战! {当前国家.宣战家族1.家族名字}VS{当前国家.宣战家族2.家族名字}");
+            return;
+        }
+        else if (当前玩家.家族 == null)
+        {
+            通用提示框.显示("请先加入或创建家族!");
+            return;
+        }
+        else if (当前玩家.家族.族长ID != 当前玩家.ID && 当前玩家.家族.副族长ID != 当前玩家.ID)
+        {
+            通用提示框.显示("族长或副族长才可宣战!");
+            return;
+        }
+        else if (当前玩家.家族.家族资金 < 10)
+        {
+            通用提示框.显示("需10家族资金才可宣战!");
+            return;
+        }
+        else
+        {
+            通用说明弹窗.显示("王城战说明", 王城战说明文本, 王城战确认宣战);
+        }
+    }
+    public void 王城战确认宣战()
+    {
+        // 调用服务端API进行宣战
+        StartCoroutine(发送宣战请求());
+    }
+
+    IEnumerator 发送宣战请求()
+    {
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null || 当前玩家.国家 == null)
+        {
+            通用提示框.显示("无法获取玩家信息");
+            yield break;
+        }
+
+        int accountId = PlayerPrefs.GetInt("AccountId", -1);
+        if (accountId <= 0)
+        {
+            通用提示框.显示("未登录，无法宣战");
+            yield break;
+        }
+
+        string json数据 = $"{{\"accountId\":{accountId},\"countryId\":{当前玩家.国家.国家ID}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(宣战接口地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError("宣战请求失败: " + 请求.error);
+                通用提示框.显示("宣战请求失败: " + 请求.error);
+            }
+            else
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                Debug.Log("宣战响应: " + 返回文本);
+
+                宣战响应 响应 = JsonUtility.FromJson<宣战响应>(返回文本);
+                if (响应 != null && 响应.success)
+                {
+                    if (响应.bothClansReady)
+                    {
+                        通用提示框.显示("宣战成功! 战场将在30秒后开启!");
+                        // 刷新国家信息以获取最新的宣战状态
+                        刷新显示();
+                        // 启动战场倒计时（从服务器获取开始时间）
+                        if (战场管理器.实例 != null)
+                        {
+                            StartCoroutine(启动战场倒计时());
+                        }
+                    }
+                    else
+                    {
+                        通用提示框.显示("宣战成功! 等待另一个家族宣战...");
+                        // 刷新国家信息
+                        刷新显示();
+                    }
+                }
+                else
+                {
+                    通用提示框.显示("宣战失败: " + (响应 != null ? 响应.message : "未知错误"));
+                }
+            }
+        }
+    }
+
+    IEnumerator 启动战场倒计时()
+    {
+        // 等待一下，确保服务器数据已更新
+        yield return new WaitForSeconds(0.5f);
+        
+        // 重新获取国家信息以获取战场开始时间
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null || 当前玩家.国家 == null) yield break;
+
+        string json数据 = $"{{\"countryId\":{当前玩家.国家.国家ID}}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(获取国家信息地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.Success)
+            {
+                string 返回文本 = 请求.downloadHandler.text;
+                获取国家信息响应 响应 = JsonUtility.FromJson<获取国家信息响应>(返回文本);
+                if (响应 != null && 响应.success && 响应.battleStartTime != null)
+                {
+                    // 解析服务器返回的开始时间
+                    if (DateTime.TryParse(响应.battleStartTime, out DateTime 开始时间))
+                    {
+                        战场管理器.实例?.启动战场倒计时(当前玩家.国家, 开始时间);
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 同步宣战家族信息到本地
+    /// </summary>
+    void 同步宣战家族信息(国家信息库 当前国家, 获取国家信息响应 响应)
+    {
+        // 同步宣战家族1
+        if (响应.warClan1Id > 0 && !string.IsNullOrEmpty(响应.warClan1Name))
+        {
+            if (当前国家.宣战家族1 == null || 当前国家.宣战家族1.家族ID != 响应.warClan1Id)
+            {
+                // 从全局变量中查找或创建家族信息
+                当前国家.宣战家族1 = 全局方法类.获取指定ID的家族(响应.warClan1Id);
+                if (当前国家.宣战家族1 == null)
+                {
+                    当前国家.宣战家族1 = new 国家系统.家族信息库
+                    {
+                        家族ID = 响应.warClan1Id,
+                        家族名字 = 响应.warClan1Name
+                    };
+                }
+            }
+        }
+        else
+        {
+            当前国家.宣战家族1 = null;
+        }
+
+        // 同步宣战家族2
+        if (响应.warClan2Id > 0 && !string.IsNullOrEmpty(响应.warClan2Name))
+        {
+            if (当前国家.宣战家族2 == null || 当前国家.宣战家族2.家族ID != 响应.warClan2Id)
+            {
+                当前国家.宣战家族2 = 全局方法类.获取指定ID的家族(响应.warClan2Id);
+                if (当前国家.宣战家族2 == null)
+                {
+                    当前国家.宣战家族2 = new 国家系统.家族信息库
+                    {
+                        家族ID = 响应.warClan2Id,
+                        家族名字 = 响应.warClan2Name
+                    };
+                }
+            }
+        }
+        else
+        {
+            当前国家.宣战家族2 = null;
+        }
+
+        // 如果有战场开始时间，启动倒计时
+        if (响应.battleStartTime != null && 当前国家.宣战家族1 != null && 当前国家.宣战家族2 != null)
+        {
+            if (DateTime.TryParse(响应.battleStartTime, out DateTime 开始时间))
+            {
+                if (战场管理器.实例 != null && !战场管理器.实例.是否倒计时中())
+                {
+                    战场管理器.实例.启动战场倒计时(当前国家, 开始时间);
+                }
+            }
+        }
+    }
 }
 
 // =================== 服务端获取国家信息返回的数据结构 ===================
@@ -243,4 +454,17 @@ public class 获取国家信息响应
     public string message;
     public int memberCount;
     public int rank;
+    public int warClan1Id;
+    public string warClan1Name;
+    public int warClan2Id;
+    public string warClan2Name;
+    public string battleStartTime; // 战场开始时间（ISO格式字符串）
+}
+
+[System.Serializable]
+public class 宣战响应
+{
+    public bool success;
+    public string message;
+    public bool bothClansReady; // 两个家族是否都就绪
 }

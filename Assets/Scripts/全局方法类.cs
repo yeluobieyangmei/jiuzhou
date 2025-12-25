@@ -43,4 +43,17 @@ public class 全局方法类 : MonoBehaviour
         }
         return null;
     }
+
+    public static 家族信息库 获取指定ID的家族(int 家族ID)
+    {
+        int count = 全局变量.所有家族列表.Count;
+        for (int i = 0; i < count; i++)
+        {
+            if (全局变量.所有家族列表[i].家族ID == 家族ID)
+            {
+                return 全局变量.所有家族列表[i];
+            }
+        }
+        return null;
+    }
 }

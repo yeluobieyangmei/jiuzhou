@@ -495,6 +495,11 @@ public class SignalR连接管理 : MonoBehaviour
                     处理系统消息事件(systemEvent);
                     处理成功 = true;
                     break;
+                case "BattlefieldCountdown":
+                    var countdownEvent = JsonUtility.FromJson<BattlefieldCountdownEvent>(message);
+                    处理战场倒计时事件(countdownEvent);
+                    处理成功 = true;
+                    break;
                 default:
                     Debug.LogWarning($"未知的游戏事件类型: {eventMessage.eventType}");
                     break;
@@ -835,6 +840,30 @@ public class SignalR连接管理 : MonoBehaviour
     }
 
     /// <summary>
+    /// 处理战场倒计时事件
+    /// </summary>
+    private void 处理战场倒计时事件(BattlefieldCountdownEvent evt)
+    {
+        if (evt == null || evt.countryId <= 0) return;
+
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null || 当前玩家.国家 == null || 当前玩家.国家.国家ID != evt.countryId)
+        {
+            return; // 不是当前玩家的国家，忽略
+        }
+
+        // 更新战场管理器的倒计时
+        if (战场管理器.实例 != null)
+        {
+            // 计算开始时间（当前时间 + 剩余秒数）
+            DateTime 开始时间 = DateTime.Now.AddSeconds(evt.remainingSeconds);
+            战场管理器.实例.启动战场倒计时(当前玩家.国家, 开始时间);
+        }
+
+        Debug.Log($"收到战场倒计时更新: 剩余 {evt.remainingSeconds} 秒");
+    }
+
+    /// <summary>
     /// 处理系统消息事件
     /// </summary>
     private void 处理系统消息事件(SystemMessageEvent evt)
@@ -1126,5 +1155,12 @@ public class SystemMessageEvent : GameEventMessage
 {
     public string message;
     public string messageTime;
+}
+
+[System.Serializable]
+public class BattlefieldCountdownEvent : GameEventMessage
+{
+    public int countryId;
+    public int remainingSeconds;
 }
 
