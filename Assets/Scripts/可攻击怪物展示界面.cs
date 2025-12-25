@@ -68,40 +68,56 @@ public class 可攻击怪物展示界面 : MonoBehaviour
     {
         if (土匪列表.Count <= 0)
         {
-            生成土匪();
-            刷新显示();
+            // 使用协程等待模板加载完成
+            StartCoroutine(生成土匪协程());
         }
         else
         {
             刷新显示();
         }
     }
+
     /// <summary>
-    /// 生成指定数量的土匪（用于初始化列表）
+    /// 生成指定数量的土匪（用于初始化列表）- 协程版本，等待模板加载完成
     /// </summary>
-    private void 生成土匪()
+    private IEnumerator 生成土匪协程()
     {
         // 联网版本：从模板生成怪物
         if (怪物模板管理.实例 == null)
         {
             Debug.LogError("怪物模板管理未初始化，无法生成怪物");
-            return;
+            yield break;
         }
 
-        // 确保模板已加载
+        // 如果模板未加载，先加载模板
         if (!怪物模板管理.实例.是否已加载)
         {
             Debug.LogWarning("怪物模板尚未加载，正在加载...");
             怪物模板管理.实例.获取怪物模板();
-            // 等待加载完成（这里简化处理，实际应该用协程等待）
-            return;
+            
+            // 等待模板加载完成（轮询检查）
+            float 超时时间 = 10f; // 10秒超时
+            float 已等待时间 = 0f;
+            while (!怪物模板管理.实例.是否已加载 && 已等待时间 < 超时时间)
+            {
+                yield return new WaitForSeconds(0.1f); // 每0.1秒检查一次
+                已等待时间 += 0.1f;
+            }
+
+            // 检查是否超时
+            if (!怪物模板管理.实例.是否已加载)
+            {
+                Debug.LogError("怪物模板加载超时");
+                yield break;
+            }
         }
 
+        // 获取模板
         服务端怪物模板数据 模板 = 怪物模板管理.实例.获取模板(怪物类型.土匪);
         if (模板 == null)
         {
             Debug.LogError("无法获取土匪模板");
-            return;
+            yield break;
         }
 
         // 生成指定数量的土匪（等级随机在基础等级附近）
@@ -109,6 +125,9 @@ public class 可攻击怪物展示界面 : MonoBehaviour
         {
             生成单个怪物(模板);
         }
+
+        // 生成完成后刷新显示
+        刷新显示();
     }
 
     /// <summary>
