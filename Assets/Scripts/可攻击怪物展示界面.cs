@@ -13,6 +13,7 @@ public class 可攻击怪物展示界面 : MonoBehaviour
     List<GameObject> 克隆池 = new List<GameObject>();
     public 怪物数据 当前选中怪物 = null;
     private List<怪物数据> 土匪列表 = new List<怪物数据>();
+    private const int 目标怪物数量 = 10; // 保持列表中的怪物数量
     public void OnEnable()
     {
         //刷新显示();
@@ -56,6 +57,9 @@ public class 可攻击怪物展示界面 : MonoBehaviour
         // 从土匪列表中移除被击败的怪物
         土匪列表.RemoveAll(怪物 => 怪物.ID == 被击败的怪物.ID);
 
+        // 自动生成新怪物来补齐列表
+        补齐怪物列表();
+
         // 重新刷新UI
         刷新显示();
     }
@@ -72,6 +76,9 @@ public class 可攻击怪物展示界面 : MonoBehaviour
             刷新显示();
         }
     }
+    /// <summary>
+    /// 生成指定数量的土匪（用于初始化列表）
+    /// </summary>
     private void 生成土匪()
     {
         // 联网版本：从模板生成怪物
@@ -97,19 +104,75 @@ public class 可攻击怪物展示界面 : MonoBehaviour
             return;
         }
 
-        // 生成10个土匪（等级随机在基础等级附近）
-        for (int i = 0; i < 10; i++)
+        // 生成指定数量的土匪（等级随机在基础等级附近）
+        for (int i = 0; i < 目标怪物数量; i++)
         {
-            // 等级在基础等级±2范围内随机
-            int 随机等级 = 模板.baseLevel + Random.Range(-2, 3);
-            随机等级 = Mathf.Max(1, 随机等级); // 至少1级
+            生成单个怪物(模板);
+        }
+    }
 
-            // 根据模板创建怪物
-            var 土匪 = 怪物数据.根据模板创建(模板, 随机等级);
-            if (土匪 != null)
-            {
-                土匪列表.Add(土匪);
-            }
+    /// <summary>
+    /// 生成单个怪物并添加到列表
+    /// </summary>
+    private void 生成单个怪物(服务端怪物模板数据 模板)
+    {
+        if (模板 == null)
+        {
+            Debug.LogError("模板为空，无法生成怪物");
+            return;
+        }
+
+        // 等级在基础等级±2范围内随机
+        int 随机等级 = 模板.baseLevel + Random.Range(-2, 3);
+        随机等级 = Mathf.Max(1, 随机等级); // 至少1级
+
+        // 根据模板创建怪物
+        var 土匪 = 怪物数据.根据模板创建(模板, 随机等级);
+        if (土匪 != null)
+        {
+            土匪列表.Add(土匪);
+        }
+    }
+
+    /// <summary>
+    /// 补齐怪物列表到目标数量
+    /// </summary>
+    private void 补齐怪物列表()
+    {
+        // 如果列表已满或超过目标数量，不需要补齐
+        if (土匪列表.Count >= 目标怪物数量)
+        {
+            return;
+        }
+
+        // 检查模板管理是否可用
+        if (怪物模板管理.实例 == null)
+        {
+            Debug.LogError("怪物模板管理未初始化，无法生成怪物");
+            return;
+        }
+
+        // 确保模板已加载
+        if (!怪物模板管理.实例.是否已加载)
+        {
+            Debug.LogWarning("怪物模板尚未加载，无法补齐怪物列表");
+            return;
+        }
+
+        服务端怪物模板数据 模板 = 怪物模板管理.实例.获取模板(怪物类型.土匪);
+        if (模板 == null)
+        {
+            Debug.LogError("无法获取土匪模板");
+            return;
+        }
+
+        // 计算需要生成的数量
+        int 需要生成数量 = 目标怪物数量 - 土匪列表.Count;
+
+        // 生成缺失的怪物
+        for (int i = 0; i < 需要生成数量; i++)
+        {
+            生成单个怪物(模板);
         }
     }
 
