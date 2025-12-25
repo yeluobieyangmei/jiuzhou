@@ -4620,6 +4620,14 @@ void 启动战场倒计时(int 国家ID, int 家族1ID, int 家族2ID, DateTime 
         {
             var 剩余时间 = (战场开始时间 - DateTime.Now).TotalSeconds;
             
+            // 立即发送第一次通知（确保所有客户端都能收到倒计时开始的通知）
+            int 初始秒数 = (int)Math.Ceiling(剩余时间);
+            if (初始秒数 > 0)
+            {
+                日志记录器.信息($"[战场倒计时] 国家 {国家ID} 战场倒计时开始，剩余 {初始秒数} 秒，立即通知所有相关玩家");
+                await 通知战场倒计时(国家ID, 家族1ID, 家族2ID, 初始秒数);
+            }
+            
             // 等待倒计时结束
             while (剩余时间 > 0 && !取消令牌源.Token.IsCancellationRequested)
             {

@@ -1,12 +1,14 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Networking;
 using System;
 using System.Threading.Tasks;
 using System.Threading;
 using System.Net.WebSockets;
 using System.Text;
 using 玩家数据结构;
+using 国家系统;
 
 /// <summary>
 /// WebSocket 连接管理器
@@ -840,7 +842,7 @@ public class SignalR连接管理 : MonoBehaviour
     }
 
     /// <summary>
-    /// 处理战场倒计时事件
+    /// 处理战场倒计时事件（从服务端WebSocket推送）
     /// </summary>
     private void 处理战场倒计时事件(BattlefieldCountdownEvent evt)
     {
@@ -852,15 +854,159 @@ public class SignalR连接管理 : MonoBehaviour
             return; // 不是当前玩家的国家，忽略
         }
 
-        // 更新战场管理器的倒计时
-        if (战场管理器.实例 != null)
+        // 检查当前玩家是否属于宣战家族（通过检查本地数据）
+        bool 可能属于宣战家族 = false;
+        if (当前玩家.家族 != null && 当前玩家.国家 != null)
         {
-            // 计算开始时间（当前时间 + 剩余秒数）
-            DateTime 开始时间 = DateTime.Now.AddSeconds(evt.remainingSeconds);
-            战场管理器.实例.启动战场倒计时(当前玩家.国家, 开始时间);
+            // 如果已经有宣战家族1或2的信息，检查是否匹配
+            if (当前玩家.国家.宣战家族1 != null && 当前玩家.家族.家族ID == 当前玩家.国家.宣战家族1.家族ID)
+            {
+                可能属于宣战家族 = true;
+            }
+            if (当前玩家.国家.宣战家族2 != null && 当前玩家.家族.家族ID == 当前玩家.国家.宣战家族2.家族ID)
+            {
+                可能属于宣战家族 = true;
+            }
         }
 
-        Debug.Log($"收到战场倒计时更新: 剩余 {evt.remainingSeconds} 秒");
+        // 如果本地没有完整的宣战家族信息，先获取最新的国家信息
+        // 因为可能家族2刚宣战，家族1客户端还不知道
+        if (!可能属于宣战家族 || 当前玩家.国家.宣战家族1 == null || 当前玩家.国家.宣战家族2 == null)
+        {
+            Debug.Log($"收到战场倒计时事件，但本地宣战信息不完整，先获取最新国家信息。家族1: {当前玩家.国家.宣战家族1?.家族名字 ?? "null"}, 家族2: {当前玩家.国家.宣战家族2?.家族名字 ?? "null"}");
+            
+            // 主动获取最新的国家信息（这会更新宣战家族信息，然后自动启动倒计时）
+            StartCoroutine(获取最新国家信息并启动倒计时(evt.countryId, evt.remainingSeconds));
+            return;
+        }
+
+        // 如果本地信息完整，直接同步倒计时
+        if (战场管理器.实例 != null)
+        {
+            战场管理器.实例.同步服务端倒计时(当前玩家.国家, evt.remainingSeconds);
+        }
+
+        Debug.Log($"收到服务端战场倒计时更新: 剩余 {evt.remainingSeconds} 秒");
+    }
+
+    /// <summary>
+    /// 获取最新国家信息并启动倒计时（用于处理倒计时事件时本地信息不完整的情况）
+    /// </summary>
+    private System.Collections.IEnumerator 获取最新国家信息并启动倒计时(int 国家ID, int 剩余秒数)
+    {
+        // 使用 UnityWebRequest 获取最新国家信息
+        string 获取国家信息地址 = "http://43.139.181.191:5000/api/getCountryInfo";
+        string json数据 = $"{{\"countryId\":{国家ID}}}";
+        byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(json数据);
+
+        using (UnityWebRequest 请求 = new UnityWebRequest(获取国家信息地址, "POST"))
+        {
+            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            请求.downloadHandler = new DownloadHandlerBuffer();
+            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
+
+            yield return 请求.SendWebRequest();
+
+            if (请求.result == UnityWebRequest.Result.ConnectionError ||
+                请求.result == UnityWebRequest.Result.ProtocolError)
+            {
+                Debug.LogError($"获取国家信息失败: {请求.error}");
+                yield break;
+            }
+
+            string 返回文本 = 请求.downloadHandler.text;
+            Debug.Log($"获取最新国家信息响应: {返回文本}");
+
+            var 响应 = JsonUtility.FromJson<获取国家信息响应>(返回文本);
+            if (响应 != null && 响应.success)
+            {
+                玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+                if (当前玩家 != null && 当前玩家.国家 != null && 当前玩家.国家.国家ID == 国家ID)
+                {
+                    // 直接手动同步宣战家族信息（确保数据同步）
+                    手动同步宣战家族信息(当前玩家.国家, 响应);
+                    
+                    // 如果存在国家信息显示组件，也调用它的同步方法以更新UI
+                    var 国家信息显示组件 = UnityEngine.Object.FindObjectOfType<国家信息显示>();
+                    if (国家信息显示组件 != null)
+                    {
+                        // 使用反射调用私有方法
+                        var 方法 = typeof(国家信息显示).GetMethod("同步宣战家族信息", 
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        if (方法 != null)
+                        {
+                            方法.Invoke(国家信息显示组件, new object[] { 当前玩家.国家, 响应 });
+                        }
+                    }
+
+                    // 等待一帧，确保数据同步完成
+                    yield return null;
+
+                    // 现在检查是否属于宣战家族
+                    bool 属于宣战家族 = false;
+                    if (当前玩家.家族 != null && 当前玩家.国家.宣战家族1 != null && 当前玩家.国家.宣战家族2 != null)
+                    {
+                        属于宣战家族 = (当前玩家.家族.家族ID == 当前玩家.国家.宣战家族1.家族ID) ||
+                                      (当前玩家.家族.家族ID == 当前玩家.国家.宣战家族2.家族ID);
+                    }
+
+                    if (属于宣战家族 && 战场管理器.实例 != null)
+                    {
+                        // 同步服务端倒计时
+                        战场管理器.实例.同步服务端倒计时(当前玩家.国家, 剩余秒数);
+                        Debug.Log($"已获取最新国家信息并启动倒计时: 剩余 {剩余秒数} 秒");
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 手动同步宣战家族信息（当找不到国家信息显示组件时使用）
+    /// </summary>
+    private void 手动同步宣战家族信息(国家信息库 当前国家, 获取国家信息响应 响应)
+    {
+        // 同步宣战家族1
+        if (响应.warClan1Id > 0 && !string.IsNullOrEmpty(响应.warClan1Name))
+        {
+            if (当前国家.宣战家族1 == null || 当前国家.宣战家族1.家族ID != 响应.warClan1Id)
+            {
+                当前国家.宣战家族1 = 全局方法类.获取指定ID的家族(响应.warClan1Id);
+                if (当前国家.宣战家族1 == null)
+                {
+                    当前国家.宣战家族1 = new 国家系统.家族信息库
+                    {
+                        家族ID = 响应.warClan1Id,
+                        家族名字 = 响应.warClan1Name
+                    };
+                }
+            }
+        }
+        else
+        {
+            当前国家.宣战家族1 = null;
+        }
+
+        // 同步宣战家族2
+        if (响应.warClan2Id > 0 && !string.IsNullOrEmpty(响应.warClan2Name))
+        {
+            if (当前国家.宣战家族2 == null || 当前国家.宣战家族2.家族ID != 响应.warClan2Id)
+            {
+                当前国家.宣战家族2 = 全局方法类.获取指定ID的家族(响应.warClan2Id);
+                if (当前国家.宣战家族2 == null)
+                {
+                    当前国家.宣战家族2 = new 国家系统.家族信息库
+                    {
+                        家族ID = 响应.warClan2Id,
+                        家族名字 = 响应.warClan2Name
+                    };
+                }
+            }
+        }
+        else
+        {
+            当前国家.宣战家族2 = null;
+        }
     }
 
     /// <summary>
