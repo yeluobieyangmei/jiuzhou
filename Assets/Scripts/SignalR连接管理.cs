@@ -245,7 +245,15 @@ public class SignalR连接管理 : MonoBehaviour
         // 直接调用异步方法（fire-and-forget，不等待完成）
         string message = $"{{\"type\":\"registerPlayerId\",\"playerId\":{当前玩家.ID}}}";
         _ = 发送消息(message); // 使用 discard 操作符，忽略返回的 Task
-        Debug.Log($"正在注册玩家ID: {当前玩家.ID}");
+        Debug.Log($"[WebSocket] 正在注册玩家ID: {当前玩家.ID}");
+        
+        // 延迟再次注册，确保服务端收到（有些情况下第一次可能丢失）
+        yield return new WaitForSeconds(2f);
+        if (是否已连接 && webSocket != null && webSocket.State == WebSocketState.Open)
+        {
+            _ = 发送消息(message);
+            Debug.Log($"[WebSocket] 二次注册玩家ID: {当前玩家.ID}");
+        }
     }
 
     /// <summary>
@@ -450,8 +458,14 @@ public class SignalR连接管理 : MonoBehaviour
             var eventMessage = JsonUtility.FromJson<GameEventMessage>(message);
             if (eventMessage == null || string.IsNullOrEmpty(eventMessage.eventType))
             {
-                Debug.LogWarning($"无法解析事件类型，消息内容: {message}");
+                Debug.LogWarning($"[WebSocket] 无法解析事件类型，消息内容: {message}");
                 yield break;
+            }
+            
+            // 如果是战场倒计时事件，先记录原始消息
+            if (eventMessage.eventType == "BattlefieldCountdown")
+            {
+                Debug.Log($"[WebSocket] 收到原始倒计时消息: {message}");
             }
 
             // 根据事件类型反序列化为对应的事件对象
@@ -499,6 +513,7 @@ public class SignalR连接管理 : MonoBehaviour
                     break;
                 case "BattlefieldCountdown":
                     var countdownEvent = JsonUtility.FromJson<BattlefieldCountdownEvent>(message);
+                    Debug.Log($"[WebSocket] 收到战场倒计时事件: 国家ID={countdownEvent?.countryId}, 剩余秒数={countdownEvent?.remainingSeconds}");
                     处理战场倒计时事件(countdownEvent);
                     处理成功 = true;
                     break;
@@ -846,13 +861,32 @@ public class SignalR连接管理 : MonoBehaviour
     /// </summary>
     private void 处理战场倒计时事件(BattlefieldCountdownEvent evt)
     {
-        if (evt == null || evt.countryId <= 0) return;
+        if (evt == null || evt.countryId <= 0)
+        {
+            Debug.LogWarning($"[战场倒计时] 事件无效: evt={evt?.countryId ?? -1}");
+            return;
+        }
 
         玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
-        if (当前玩家 == null || 当前玩家.国家 == null || 当前玩家.国家.国家ID != evt.countryId)
+        if (当前玩家 == null)
         {
+            Debug.LogWarning("[战场倒计时] 当前玩家数据为空");
+            return;
+        }
+        
+        if (当前玩家.国家 == null)
+        {
+            Debug.LogWarning("[战场倒计时] 当前玩家没有国家信息");
+            return;
+        }
+        
+        if (当前玩家.国家.国家ID != evt.countryId)
+        {
+            Debug.Log($"[战场倒计时] 国家ID不匹配: 当前国家ID={当前玩家.国家.国家ID}, 事件国家ID={evt.countryId}，忽略");
             return; // 不是当前玩家的国家，忽略
         }
+        
+        Debug.Log($"[战场倒计时] 开始处理倒计时事件: 国家ID={evt.countryId}, 剩余秒数={evt.remainingSeconds}, 玩家ID={当前玩家.ID}, 家族ID={当前玩家.家族?.家族ID ?? -1}");
 
         // 检查当前玩家是否属于宣战家族（通过检查本地数据）
         bool 可能属于宣战家族 = false;
@@ -883,10 +917,13 @@ public class SignalR连接管理 : MonoBehaviour
         // 如果本地信息完整，直接同步倒计时
         if (战场管理器.实例 != null)
         {
+            Debug.Log($"[战场倒计时] 本地信息完整，直接同步倒计时: 剩余 {evt.remainingSeconds} 秒");
             战场管理器.实例.同步服务端倒计时(当前玩家.国家, evt.remainingSeconds);
         }
-
-        Debug.Log($"收到服务端战场倒计时更新: 剩余 {evt.remainingSeconds} 秒");
+        else
+        {
+            Debug.LogWarning("[战场倒计时] 战场管理器实例为空，无法同步倒计时");
+        }
     }
 
     /// <summary>
@@ -954,7 +991,18 @@ public class SignalR连接管理 : MonoBehaviour
                     {
                         // 同步服务端倒计时
                         战场管理器.实例.同步服务端倒计时(当前玩家.国家, 剩余秒数);
-                        Debug.Log($"已获取最新国家信息并启动倒计时: 剩余 {剩余秒数} 秒");
+                        Debug.Log($"[战场倒计时] 已获取最新国家信息并启动倒计时: 剩余 {剩余秒数} 秒，家族1={当前玩家.国家.宣战家族1?.家族名字 ?? "null"}, 家族2={当前玩家.国家.宣战家族2?.家族名字 ?? "null"}");
+                    }
+                    else
+                    {
+                        if (!属于宣战家族)
+                        {
+                            Debug.LogWarning($"[战场倒计时] 获取最新信息后，玩家不属于宣战家族。玩家家族ID={当前玩家.家族?.家族ID ?? -1}, 宣战家族1={当前玩家.国家.宣战家族1?.家族ID ?? -1}, 宣战家族2={当前玩家.国家.宣战家族2?.家族ID ?? -1}");
+                        }
+                        if (战场管理器.实例 == null)
+                        {
+                            Debug.LogError("[战场倒计时] 战场管理器实例为空");
+                        }
                     }
                 }
             }

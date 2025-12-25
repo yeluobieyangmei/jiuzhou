@@ -4620,11 +4620,14 @@ void 启动战场倒计时(int 国家ID, int 家族1ID, int 家族2ID, DateTime 
         {
             var 剩余时间 = (战场开始时间 - DateTime.Now).TotalSeconds;
             
-            // 立即发送第一次通知（确保所有客户端都能收到倒计时开始的通知）
-            int 初始秒数 = (int)Math.Ceiling(剩余时间);
+            // 延迟1秒后发送第一次通知（给客户端注册玩家ID的时间）
+            await Task.Delay(1000);
+            
+            // 发送第一次通知（确保所有客户端都能收到倒计时开始的通知）
+            int 初始秒数 = (int)Math.Ceiling((战场开始时间 - DateTime.Now).TotalSeconds);
             if (初始秒数 > 0)
             {
-                日志记录器.信息($"[战场倒计时] 国家 {国家ID} 战场倒计时开始，剩余 {初始秒数} 秒，立即通知所有相关玩家");
+                日志记录器.信息($"[战场倒计时] 国家 {国家ID} 战场倒计时开始，剩余 {初始秒数} 秒，通知所有相关玩家");
                 await 通知战场倒计时(国家ID, 家族1ID, 家族2ID, 初始秒数);
             }
             
@@ -4633,14 +4636,18 @@ void 启动战场倒计时(int 国家ID, int 家族1ID, int 家族2ID, DateTime 
             {
                 await Task.Delay(1000, 取消令牌源.Token); // 每秒检查一次
                 剩余时间 = (战场开始时间 - DateTime.Now).TotalSeconds;
-
-                // 每5秒或最后10秒时，通过WebSocket通知所有相关玩家
+                
                 int 整数秒数 = (int)Math.Ceiling(剩余时间);
-                if (整数秒数 % 5 == 0 || 整数秒数 <= 10)
+                
+                // 每秒都发送通知（确保所有客户端都能收到实时更新）
+                // 但减少日志输出，只在特定时刻记录
+                if (整数秒数 % 5 == 0 || 整数秒数 <= 15 || 整数秒数 == 30 || 整数秒数 == 25 || 整数秒数 == 20)
                 {
-                    // 通知两个家族的所有在线玩家
-                    await 通知战场倒计时(国家ID, 家族1ID, 家族2ID, 整数秒数);
+                    日志记录器.信息($"[战场倒计时] 国家 {国家ID} 倒计时 {整数秒数} 秒，通知所有相关玩家");
                 }
+                
+                // 每秒都通知所有相关玩家
+                await 通知战场倒计时(国家ID, 家族1ID, 家族2ID, 整数秒数);
             }
 
             // 倒计时结束，生成战场
@@ -4709,19 +4716,61 @@ async Task 通知战场倒计时(int 国家ID, int 家族1ID, int 家族2ID, int
     string 消息内容 = JsonSerializer.Serialize(倒计时事件);
     byte[] 消息字节 = Encoding.UTF8.GetBytes(消息内容);
 
+    int 成功发送数 = 0;
+    int 失败发送数 = 0;
+    int 不在线数 = 0;
+    
+    日志记录器.信息($"[战场倒计时通知] 开始发送倒计时通知：国家ID={国家ID}, 剩余秒数={剩余秒数}, 玩家总数={玩家ID列表.Count}, 在线连接数={玩家连接映射.Count}");
+    
     foreach (var 玩家ID in 玩家ID列表)
     {
-        if (玩家连接映射.TryGetValue(玩家ID, out var socket) && socket != null && socket.State == WebSocketState.Open)
+        if (玩家连接映射.TryGetValue(玩家ID, out var socket))
         {
-            try
+            if (socket != null && socket.State == WebSocketState.Open)
             {
-                await socket.SendAsync(new ArraySegment<byte>(消息字节), WebSocketMessageType.Text, true, CancellationToken.None);
+                try
+                {
+                    await socket.SendAsync(new ArraySegment<byte>(消息字节), WebSocketMessageType.Text, true, CancellationToken.None);
+                    成功发送数++;
+                    // 只在关键时刻记录详细日志，避免日志过多
+                    if (剩余秒数 == 30 || 剩余秒数 == 15 || 剩余秒数 <= 10)
+                    {
+                        日志记录器.信息($"[战场倒计时通知] 已发送给玩家 {玩家ID}，剩余 {剩余秒数} 秒");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    失败发送数++;
+                    日志记录器.错误($"[战场倒计时通知] 发送给玩家 {玩家ID} 失败: {ex.Message}");
+                }
             }
-            catch
+            else
             {
-                // 忽略发送失败
+                不在线数++;
+                if (socket == null)
+                {
+                    日志记录器.警告($"[战场倒计时通知] 玩家 {玩家ID} 的连接对象为null");
+                }
+                else
+                {
+                    日志记录器.警告($"[战场倒计时通知] 玩家 {玩家ID} 的连接状态异常: {socket.State}");
+                }
             }
         }
+        else
+        {
+            不在线数++;
+            if (剩余秒数 == 30 || 剩余秒数 == 15 || 剩余秒数 <= 10)
+            {
+                日志记录器.警告($"[战场倒计时通知] 玩家 {玩家ID} 不在玩家连接映射中（可能未注册或已断开）");
+            }
+        }
+    }
+    
+    // 只在关键时刻或有问题时记录汇总日志
+    if (剩余秒数 == 30 || 剩余秒数 == 15 || 剩余秒数 <= 10 || 成功发送数 == 0 || 失败发送数 > 0)
+    {
+        日志记录器.信息($"[战场倒计时通知] 汇总：国家ID={国家ID}, 剩余秒数={剩余秒数}, 总玩家={玩家ID列表.Count}, 成功={成功发送数}, 不在线={不在线数}, 失败={失败发送数}");
     }
 }
 
