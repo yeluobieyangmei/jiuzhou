@@ -230,20 +230,34 @@ public class SignalR连接管理 : MonoBehaviour
     /// </summary>
     private IEnumerator 延迟注册玩家ID()
     {
+        Debug.Log("[WebSocket] 开始延迟注册玩家ID协程");
+        
         // 等待1秒，确保玩家数据已加载完成
         yield return new WaitForSeconds(1f);
 
-        if (!是否已连接 || webSocket == null) yield break;
+        if (!是否已连接 || webSocket == null)
+        {
+            Debug.LogWarning("[WebSocket] 连接未建立，无法注册玩家ID");
+            yield break;
+        }
 
         var 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
         if (当前玩家 == null || 当前玩家.ID <= 0)
         {
-            Debug.LogWarning("玩家数据未加载，无法注册玩家ID");
-            yield break;
+            Debug.LogWarning($"[WebSocket] 玩家数据未加载，无法注册玩家ID。当前玩家: {当前玩家?.ID ?? -1}");
+            // 再等待2秒，可能玩家数据还在加载
+            yield return new WaitForSeconds(2f);
+            当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+            if (当前玩家 == null || 当前玩家.ID <= 0)
+            {
+                Debug.LogError("[WebSocket] 等待后玩家数据仍未加载，无法注册玩家ID");
+                yield break;
+            }
         }
 
         // 直接调用异步方法（fire-and-forget，不等待完成）
         string message = $"{{\"type\":\"registerPlayerId\",\"playerId\":{当前玩家.ID}}}";
+        Debug.Log($"[WebSocket] 准备发送注册消息: {message}");
         _ = 发送消息(message); // 使用 discard 操作符，忽略返回的 Task
         Debug.Log($"[WebSocket] 正在注册玩家ID: {当前玩家.ID}");
         
@@ -253,6 +267,10 @@ public class SignalR连接管理 : MonoBehaviour
         {
             _ = 发送消息(message);
             Debug.Log($"[WebSocket] 二次注册玩家ID: {当前玩家.ID}");
+        }
+        else
+        {
+            Debug.LogWarning($"[WebSocket] 二次注册失败：连接状态 - 已连接={是否已连接}, WebSocket状态={webSocket?.State}");
         }
     }
 
@@ -390,6 +408,12 @@ public class SignalR连接管理 : MonoBehaviour
                 {
                     string message = Encoding.UTF8.GetString(buffer, 0, result.Count);
                     
+                    // 如果是战场倒计时事件，立即记录日志（用于调试）
+                    if (message.Contains("BattlefieldCountdown"))
+                    {
+                        Debug.Log($"[WebSocket] 收到原始倒计时消息（接收循环）: {message}");
+                    }
+                    
                     // 将消息加入队列，等待在主线程处理
                     lock (消息队列锁)
                     {
@@ -454,6 +478,12 @@ public class SignalR连接管理 : MonoBehaviour
         
         try
         {
+            // 如果是战场倒计时事件，先记录原始消息（用于调试）
+            if (message.Contains("BattlefieldCountdown"))
+            {
+                Debug.Log($"[WebSocket] 在主线程处理倒计时消息: {message}");
+            }
+            
             // 先解析 eventType 字段
             var eventMessage = JsonUtility.FromJson<GameEventMessage>(message);
             if (eventMessage == null || string.IsNullOrEmpty(eventMessage.eventType))
@@ -462,11 +492,7 @@ public class SignalR连接管理 : MonoBehaviour
                 yield break;
             }
             
-            // 如果是战场倒计时事件，先记录原始消息
-            if (eventMessage.eventType == "BattlefieldCountdown")
-            {
-                Debug.Log($"[WebSocket] 收到原始倒计时消息: {message}");
-            }
+            Debug.Log($"[WebSocket] 解析到事件类型: {eventMessage.eventType}");
 
             // 根据事件类型反序列化为对应的事件对象
             switch (eventMessage.eventType)
@@ -535,9 +561,9 @@ public class SignalR连接管理 : MonoBehaviour
     /// </summary>
     private async Task 发送消息(string message)
     {
-        if (webSocket == null || webSocket.State != WebSocketState.Open)
+        if (!是否已连接 || webSocket == null || webSocket.State != WebSocketState.Open)
         {
-            Debug.LogWarning("WebSocket 未连接，无法发送消息");
+            Debug.LogWarning($"[WebSocket] 连接未建立，无法发送消息: {message}");
             return;
         }
 
@@ -545,10 +571,13 @@ public class SignalR连接管理 : MonoBehaviour
         {
             byte[] buffer = Encoding.UTF8.GetBytes(message);
             await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None);
+            Debug.Log($"[WebSocket] 消息已发送: {message}");
         }
         catch (Exception ex)
         {
-            Debug.LogError($"发送 WebSocket 消息失败: {ex.Message}");
+            Debug.LogError($"[WebSocket] 发送消息失败: {ex.Message}，消息内容: {message}");
+            // 发送失败，可能连接已断开
+            是否已连接 = false;
         }
     }
 

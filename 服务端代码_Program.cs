@@ -64,9 +64,6 @@ var 玩家最后发言时间 = new System.Collections.Concurrent.ConcurrentDicti
 // 消息队列（优先级队列：系统(0) > 家族(1) > 国家(2) > 世界(3)）
 var 消息队列 = new System.Collections.Concurrent.ConcurrentQueue<待处理消息>();
 
-// 战场倒计时任务字典（Key: 国家ID, Value: 取消令牌）
-var 战场倒计时任务 = new System.Collections.Concurrent.ConcurrentDictionary<int, CancellationTokenSource>();
-
 // 心跳超时时间（秒）- 如果超过这个时间没有心跳，认为账号已离线
 const int 心跳超时秒数 = 120; // 2分钟无心跳则认为离线
 
@@ -236,6 +233,7 @@ app.Map("/ws", async context =>
             else if (result.MessageType == WebSocketMessageType.Text)
             {
                 var msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                日志记录器.信息($"[WebSocket] 收到原始客户端消息: {msg}"); // 添加原始消息日志
                 
                 // 处理不同类型的消息
                 try
@@ -244,6 +242,7 @@ app.Map("/ws", async context =>
                     if (jsonDoc.RootElement.TryGetProperty("type", out var typeProp))
                     {
                         string? 消息类型 = typeProp.GetString();
+                        日志记录器.信息($"[WebSocket] 收到消息类型: {消息类型}");
                         
                         // 处理心跳消息
                         if (消息类型 == "heartbeat")
@@ -253,24 +252,37 @@ app.Map("/ws", async context =>
                             continue;
                         }
                         
-                        // 处理玩家ID注册消息
-                        if (!已注册玩家ID && 消息类型 == "registerPlayerId" &&
-                            jsonDoc.RootElement.TryGetProperty("playerId", out var playerIdProp))
+                        // 处理玩家ID注册消息（允许重复注册，用于更新连接）
+                        if (消息类型 == "registerPlayerId")
                         {
-                            int 注册玩家ID = playerIdProp.GetInt32();
-                            玩家连接映射.AddOrUpdate(注册玩家ID, webSocket, (key, oldValue) => webSocket);
-                            已注册玩家ID = true;
-                            WebSocketConnectionManager.UpdateHeartbeat(webSocket);
-                            日志记录器.信息($"[WebSocket] 玩家ID已注册: {注册玩家ID}");
-                            continue;
+                            日志记录器.信息($"[WebSocket] 开始处理registerPlayerId消息，消息内容: {msg}");
+                            if (jsonDoc.RootElement.TryGetProperty("playerId", out var playerIdProp))
+                            {
+                                int 注册玩家ID = playerIdProp.GetInt32();
+                                玩家连接映射.AddOrUpdate(注册玩家ID, webSocket, (key, oldValue) => webSocket);
+                                已注册玩家ID = true;
+                                WebSocketConnectionManager.UpdateHeartbeat(webSocket);
+                                日志记录器.信息($"[WebSocket] 玩家ID已注册: {注册玩家ID}，当前连接映射总数: {玩家连接映射.Count}，连接映射中的玩家ID: {string.Join(", ", 玩家连接映射.Keys)}");
+                                continue;
+                            }
+                            else
+                            {
+                                日志记录器.错误($"[WebSocket] registerPlayerId消息缺少playerId字段，消息内容: {msg}");
+                            }
                         }
                     }
+                    else
+                    {
+                        日志记录器.警告($"[WebSocket] 消息缺少type字段，消息内容: {msg}");
+                    }
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // 解析失败，忽略
+                    // 解析失败，记录错误但继续处理
+                    日志记录器.错误($"[WebSocket] 解析消息失败: {ex.Message}，堆栈: {ex.StackTrace}，消息内容: {msg}");
                 }
                 
+                // 如果消息没有被continue处理，记录为忽略
                 日志记录器.信息($"[WebSocket] 收到客户端消息（忽略处理）：{msg}");
             }
         }
@@ -1249,7 +1261,7 @@ app.MapPost("/api/getCountryInfo", async ([FromBody] GetCountryInfoRequest 请�
     {
         if (请求.CountryId <= 0)
         {
-            return Results.Ok(new GetCountryInfoResponse(false, "国家ID无效", 0, 0, null, null, null, null, null));
+            return Results.Ok(new GetCountryInfoResponse(false, "国家ID无效", 0, 0));
         }
 
         using var connection = new MySqlConnection(数据库连接字符串);
@@ -1266,7 +1278,7 @@ app.MapPost("/api/getCountryInfo", async ([FromBody] GetCountryInfoRequest 请�
 
             if (countryCount == 0)
             {
-                return Results.Ok(new GetCountryInfoResponse(false, "指定的国家不存在", 0, 0, null, null, null, null, null));
+                return Results.Ok(new GetCountryInfoResponse(false, "指定的国家不存在", 0, 0));
             }
         }
 
@@ -1298,59 +1310,16 @@ app.MapPost("/api/getCountryInfo", async ([FromBody] GetCountryInfoRequest 请�
             排名 = (int)rankVal;
         }
 
-        // 查询宣战家族信息
-        int? 宣战家族1ID = null;
-        string? 宣战家族1名称 = null;
-        int? 宣战家族2ID = null;
-        string? 宣战家族2名称 = null;
-        DateTime? 战场开始时间 = null;
-
-            using (var warCmd = new MySqlCommand(
-            @"SELECT 
-                c.war_clan1_id, c1.name as clan1_name,
-                c.war_clan2_id, c2.name as clan2_name,
-                b.start_time
-              FROM countries c
-              LEFT JOIN clans c1 ON c.war_clan1_id = c1.id
-              LEFT JOIN clans c2 ON c.war_clan2_id = c2.id
-              LEFT JOIN battlefields b ON b.country_id = c.id AND b.battlefield_status = 'preparing'
-              WHERE c.id = @country_id
-              LIMIT 1",
-            connection))
-        {
-            warCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
-            using var warReader = await warCmd.ExecuteReaderAsync();
-            if (await warReader.ReadAsync())
-            {
-                if (!warReader.IsDBNull(0))
-                {
-                    宣战家族1ID = warReader.GetInt32(0);
-                    宣战家族1名称 = warReader.IsDBNull(1) ? null : warReader.GetString(1);
-                }
-                if (!warReader.IsDBNull(2))
-                {
-                    宣战家族2ID = warReader.GetInt32(2);
-                    宣战家族2名称 = warReader.IsDBNull(3) ? null : warReader.GetString(3);
-                }
-                战场开始时间 = warReader.IsDBNull(4) ? null : warReader.GetDateTime(4);
-            }
-        }
-
         return Results.Ok(new GetCountryInfoResponse(
             true, 
             "获取国家信息成功", 
             成员总数, 
-            排名,
-            宣战家族1ID,
-            宣战家族1名称,
-            宣战家族2ID,
-            宣战家族2名称,
-            战场开始时间
+            排名
         ));
     }
     catch (Exception ex)
     {
-        return Results.Ok(new GetCountryInfoResponse(false, "服务器错误: " + ex.Message, 0, 0, null, null, null, null, null));
+        return Results.Ok(new GetCountryInfoResponse(false, "服务器错误: " + ex.Message, 0, 0));
     }
 });
 
@@ -1360,9 +1329,9 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
 {
     try
     {
-        if (请求.AccountId <= 0 || 请求.CountryId <= 0)
+        if (请求.AccountId <= 0 || 请求.CountryId <= 0 || 请求.ClanId <= 0)
         {
-            return Results.Ok(new DeclareWarResponse(false, "账号ID或国家ID无效", false));
+            return Results.Ok(new DeclareWarResponse(false, "参数无效", null));
         }
 
         using var connection = new MySqlConnection(数据库连接字符串);
@@ -1373,9 +1342,9 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
 
         try
         {
-            // 1. 查询玩家信息
+            // 1. 验证玩家是否存在且属于该家族
             int 玩家ID = -1;
-            int? 家族ID = null;
+            int? 玩家家族ID = null;
             using (var playerCmd = new MySqlCommand(
                 "SELECT id, clan_id FROM players WHERE account_id = @account_id LIMIT 1",
                 connection,
@@ -1386,20 +1355,20 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
                 if (await playerReader.ReadAsync())
                 {
                     玩家ID = playerReader.GetInt32(0);
-                    家族ID = playerReader.IsDBNull(1) ? null : playerReader.GetInt32(1);
+                    玩家家族ID = playerReader.IsDBNull(1) ? null : playerReader.GetInt32(1);
                 }
                 else
                 {
                     await transaction.RollbackAsync();
-                    return Results.Ok(new DeclareWarResponse(false, "玩家不存在", false));
+                    return Results.Ok(new DeclareWarResponse(false, "玩家不存在", null));
                 }
             }
 
-            // 2. 检查玩家是否有家族
-            if (!家族ID.HasValue || 家族ID.Value <= 0)
+            // 2. 检查玩家是否属于请求的家族
+            if (!玩家家族ID.HasValue || 玩家家族ID.Value != 请求.ClanId)
             {
                 await transaction.RollbackAsync();
-                return Results.Ok(new DeclareWarResponse(false, "请先加入或创建家族", false));
+                return Results.Ok(new DeclareWarResponse(false, "你不属于该家族", null));
             }
 
             // 3. 检查玩家是否是族长或副族长
@@ -1408,7 +1377,7 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
                 connection,
                 transaction))
             {
-                roleCmd.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+                roleCmd.Parameters.AddWithValue("@clan_id", 请求.ClanId);
                 using var roleReader = await roleCmd.ExecuteReaderAsync();
                 if (await roleReader.ReadAsync())
                 {
@@ -1418,42 +1387,27 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
                     if (玩家ID != 族长ID && 玩家ID != 副族长ID)
                     {
                         await transaction.RollbackAsync();
-                        return Results.Ok(new DeclareWarResponse(false, "只有族长或副族长可以宣战", false));
+                        return Results.Ok(new DeclareWarResponse(false, "只有族长或副族长可以宣战", null));
                     }
                 }
                 else
                 {
                     await transaction.RollbackAsync();
-                    return Results.Ok(new DeclareWarResponse(false, "家族不存在", false));
+                    return Results.Ok(new DeclareWarResponse(false, "家族不存在", null));
                 }
             }
 
-            // 4. 检查家族资金是否足够（需要10家族资金）
-            int 家族资金 = 0;
-            using (var fundsCmd = new MySqlCommand(
-                "SELECT funds FROM clans WHERE id = @clan_id",
-                connection,
-                transaction))
-            {
-                fundsCmd.Parameters.AddWithValue("@clan_id", 家族ID.Value);
-                var fundsObj = await fundsCmd.ExecuteScalarAsync();
-                if (fundsObj != null)
-                {
-                    家族资金 = Convert.ToInt32(fundsObj);
-                }
-            }
-
-            if (家族资金 < 10)
-            {
-                await transaction.RollbackAsync();
-                return Results.Ok(new DeclareWarResponse(false, "家族资金不足，需要10家族资金", false));
-            }
-
-            // 5. 查询当前国家的宣战状态
+            // 4. 查询当前国家的宣战状态
             int? 宣战家族1ID = null;
+            string? 宣战家族1名称 = null;
             int? 宣战家族2ID = null;
+            string? 宣战家族2名称 = null;
             using (var countryCmd = new MySqlCommand(
-                "SELECT war_clan1_id, war_clan2_id FROM countries WHERE id = @country_id",
+                @"SELECT c.war_clan1_id, c1.name, c.war_clan2_id, c2.name
+                  FROM countries c
+                  LEFT JOIN clans c1 ON c.war_clan1_id = c1.id
+                  LEFT JOIN clans c2 ON c.war_clan2_id = c2.id
+                  WHERE c.id = @country_id",
                 connection,
                 transaction))
             {
@@ -1462,41 +1416,64 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
                 if (await countryReader.ReadAsync())
                 {
                     宣战家族1ID = countryReader.IsDBNull(0) ? null : countryReader.GetInt32(0);
-                    宣战家族2ID = countryReader.IsDBNull(1) ? null : countryReader.GetInt32(1);
+                    宣战家族1名称 = countryReader.IsDBNull(1) ? null : countryReader.GetString(1);
+                    宣战家族2ID = countryReader.IsDBNull(2) ? null : countryReader.GetInt32(2);
+                    宣战家族2名称 = countryReader.IsDBNull(3) ? null : countryReader.GetString(3);
                 }
                 else
                 {
                     await transaction.RollbackAsync();
-                    return Results.Ok(new DeclareWarResponse(false, "国家不存在", false));
+                    return Results.Ok(new DeclareWarResponse(false, "国家不存在", null));
                 }
             }
 
-            // 6. 检查是否已经宣战
-            if (宣战家族1ID == 家族ID.Value || 宣战家族2ID == 家族ID.Value)
-            {
-                await transaction.RollbackAsync();
-                return Results.Ok(new DeclareWarResponse(false, "你的家族已经宣战", false));
-            }
-
-            // 7. 检查是否已经有两个家族宣战
+            // 5. 检查是否已经有两个家族宣战
             if (宣战家族1ID.HasValue && 宣战家族2ID.HasValue)
             {
                 await transaction.RollbackAsync();
-                return Results.Ok(new DeclareWarResponse(false, "当前已有两个家族宣战，无法再宣战", false));
+                string 提示信息 = $"当前已有家族宣战：{宣战家族1名称} VS {宣战家族2名称}";
+                return Results.Ok(new DeclareWarResponse(false, 提示信息, new DeclareWarData
+                {
+                    WarClan1Id = 宣战家族1ID.Value,
+                    WarClan1Name = 宣战家族1名称 ?? "",
+                    WarClan2Id = 宣战家族2ID.Value,
+                    WarClan2Name = 宣战家族2名称 ?? ""
+                }));
             }
 
-            // 8. 扣除家族资金并设置宣战家族
+            // 6. 检查是否已经宣战
+            if (宣战家族1ID == 请求.ClanId || 宣战家族2ID == 请求.ClanId)
+            {
+                await transaction.RollbackAsync();
+                return Results.Ok(new DeclareWarResponse(false, "你的家族已经宣战", null));
+            }
+
+            // 7. 获取家族名称
+            string 家族名称 = "";
+            using (var clanNameCmd = new MySqlCommand(
+                "SELECT name FROM clans WHERE id = @clan_id",
+                connection,
+                transaction))
+            {
+                clanNameCmd.Parameters.AddWithValue("@clan_id", 请求.ClanId);
+                var nameObj = await clanNameCmd.ExecuteScalarAsync();
+                if (nameObj != null)
+                {
+                    家族名称 = nameObj.ToString() ?? "";
+                }
+            }
+
+            // 8. 记录宣战家族信息
             bool 两个家族都就绪 = false;
             if (!宣战家族1ID.HasValue)
             {
                 // 设置宣战家族1
                 using (var updateCmd = new MySqlCommand(
-                    @"UPDATE countries SET war_clan1_id = @clan_id WHERE id = @country_id;
-                      UPDATE clans SET funds = funds - 10, is_war_declared = TRUE WHERE id = @clan_id",
+                    "UPDATE countries SET war_clan1_id = @clan_id WHERE id = @country_id",
                     connection,
                     transaction))
                 {
-                    updateCmd.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+                    updateCmd.Parameters.AddWithValue("@clan_id", 请求.ClanId);
                     updateCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
                     await updateCmd.ExecuteNonQueryAsync();
                 }
@@ -1505,53 +1482,42 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
             {
                 // 设置宣战家族2
                 using (var updateCmd = new MySqlCommand(
-                    @"UPDATE countries SET war_clan2_id = @clan_id WHERE id = @country_id;
-                      UPDATE clans SET funds = funds - 10, is_war_declared = TRUE WHERE id = @clan_id",
+                    "UPDATE countries SET war_clan2_id = @clan_id WHERE id = @country_id",
                     connection,
                     transaction))
                 {
-                    updateCmd.Parameters.AddWithValue("@clan_id", 家族ID.Value);
+                    updateCmd.Parameters.AddWithValue("@clan_id", 请求.ClanId);
                     updateCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
                     await updateCmd.ExecuteNonQueryAsync();
                 }
                 两个家族都就绪 = true;
             }
 
-            // 9. 如果两个家族都就绪，创建战场记录并开始倒计时
-            if (两个家族都就绪)
-            {
-                // 查询两个家族ID
-                int 最终家族1ID = 宣战家族1ID ?? 家族ID.Value;
-                int 最终家族2ID = 家族ID.Value;
-
-                // 创建或更新战场记录
-                DateTime 战场开始时间 = DateTime.Now.AddSeconds(30); // 30秒后开始
-                using (var battlefieldCmd = new MySqlCommand(
-                    @"INSERT INTO battlefields (country_id, clan_a_id, clan_b_id, battlefield_status, start_time, created_at)
-                      VALUES (@country_id, @clan1_id, @clan2_id, 'preparing', @battle_start_time, NOW())
-                      ON DUPLICATE KEY UPDATE
-                          clan_a_id = @clan1_id,
-                          clan_b_id = @clan2_id,
-                          battlefield_status = 'preparing',
-                          start_time = @battle_start_time",
-                    connection,
-                    transaction))
-                {
-                    battlefieldCmd.Parameters.AddWithValue("@country_id", 请求.CountryId);
-                    battlefieldCmd.Parameters.AddWithValue("@clan1_id", 最终家族1ID);
-                    battlefieldCmd.Parameters.AddWithValue("@clan2_id", 最终家族2ID);
-                    battlefieldCmd.Parameters.AddWithValue("@battle_start_time", 战场开始时间);
-                    await battlefieldCmd.ExecuteNonQueryAsync();
-                }
-
-                // 启动后台倒计时任务（这里简化处理，实际应该用后台服务）
-                启动战场倒计时(请求.CountryId, 最终家族1ID, 最终家族2ID, 战场开始时间);
-            }
-
             // 提交事务
             await transaction.CommitAsync();
 
-            return Results.Ok(new DeclareWarResponse(true, "宣战成功", 两个家族都就绪));
+            // 9. 如果两个家族都就绪，启动倒计时
+            if (两个家族都就绪)
+            {
+                // 此时宣战家族1已经存在，当前宣战的是家族2
+                int 最终家族1ID = 宣战家族1ID ?? 请求.ClanId;
+                int 最终家族2ID = 请求.ClanId;
+                string 最终家族1名称 = 宣战家族1名称 ?? "";
+                string 最终家族2名称 = 家族名称;
+
+                日志记录器.信息($"[宣战API] 两个家族都已宣战，准备启动倒计时 - 国家ID: {请求.CountryId}, 家族1: {最终家族1名称}({最终家族1ID}), 家族2: {最终家族2名称}({最终家族2ID})");
+
+                // 启动倒计时
+                var loggerFactory = app.Services.GetRequiredService<ILoggerFactory>();
+                var logger = loggerFactory.CreateLogger("战场管理");
+                战场管理.启动倒计时(请求.CountryId, 最终家族1ID, 最终家族1名称, 最终家族2ID, 最终家族2名称, 数据库连接字符串, 玩家连接映射, logger);
+            }
+            else
+            {
+                日志记录器.信息($"[宣战API] 第一个家族宣战 - 国家ID: {请求.CountryId}, 家族: {家族名称}({请求.ClanId})");
+            }
+
+            return Results.Ok(new DeclareWarResponse(true, "宣战成功", null));
         }
         catch
         {
@@ -1561,7 +1527,7 @@ app.MapPost("/api/declareWar", async ([FromBody] DeclareWarRequest 请求) =>
     }
     catch (Exception ex)
     {
-        return Results.Ok(new DeclareWarResponse(false, "服务器错误: " + ex.Message, false));
+        return Results.Ok(new DeclareWarResponse(false, "服务器错误: " + ex.Message, null));
     }
 });
 
@@ -4597,220 +4563,6 @@ static async Task 记录家族日志(
     }
 }
 
-// =================== 战场倒计时管理 ===================
-
-/// <summary>
-/// 启动战场倒计时
-/// </summary>
-void 启动战场倒计时(int 国家ID, int 家族1ID, int 家族2ID, DateTime 战场开始时间)
-{
-    // 如果已有倒计时任务，先取消
-    if (战场倒计时任务.TryGetValue(国家ID, out var 旧任务))
-    {
-        旧任务.Cancel();
-        战场倒计时任务.TryRemove(国家ID, out _);
-    }
-
-    var 取消令牌源 = new CancellationTokenSource();
-    战场倒计时任务.TryAdd(国家ID, 取消令牌源);
-
-    _ = Task.Run(async () =>
-    {
-        try
-        {
-            var 剩余时间 = (战场开始时间 - DateTime.Now).TotalSeconds;
-            
-            // 延迟1秒后发送第一次通知（给客户端注册玩家ID的时间）
-            await Task.Delay(1000);
-            
-            // 发送第一次通知（确保所有客户端都能收到倒计时开始的通知）
-            int 初始秒数 = (int)Math.Ceiling((战场开始时间 - DateTime.Now).TotalSeconds);
-            if (初始秒数 > 0)
-            {
-                日志记录器.信息($"[战场倒计时] 国家 {国家ID} 战场倒计时开始，剩余 {初始秒数} 秒，通知所有相关玩家");
-                await 通知战场倒计时(国家ID, 家族1ID, 家族2ID, 初始秒数);
-            }
-            
-            // 等待倒计时结束
-            while (剩余时间 > 0 && !取消令牌源.Token.IsCancellationRequested)
-            {
-                await Task.Delay(1000, 取消令牌源.Token); // 每秒检查一次
-                剩余时间 = (战场开始时间 - DateTime.Now).TotalSeconds;
-                
-                int 整数秒数 = (int)Math.Ceiling(剩余时间);
-                
-                // 每秒都发送通知（确保所有客户端都能收到实时更新）
-                // 但减少日志输出，只在特定时刻记录
-                if (整数秒数 % 5 == 0 || 整数秒数 <= 15 || 整数秒数 == 30 || 整数秒数 == 25 || 整数秒数 == 20)
-                {
-                    日志记录器.信息($"[战场倒计时] 国家 {国家ID} 倒计时 {整数秒数} 秒，通知所有相关玩家");
-                }
-                
-                // 每秒都通知所有相关玩家
-                await 通知战场倒计时(国家ID, 家族1ID, 家族2ID, 整数秒数);
-            }
-
-            // 倒计时结束，生成战场
-            if (!取消令牌源.Token.IsCancellationRequested && 剩余时间 <= 0)
-            {
-                日志记录器.信息($"[战场倒计时] 国家 {国家ID} 的战场倒计时结束，开始生成战场");
-                await 生成战场(国家ID, 家族1ID, 家族2ID);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            日志记录器.信息($"[战场倒计时] 国家 {国家ID} 的倒计时已取消");
-        }
-        catch (Exception ex)
-        {
-            日志记录器.错误($"[战场倒计时] 国家 {国家ID} 的倒计时任务出错: {ex.Message}");
-        }
-        finally
-        {
-            战场倒计时任务.TryRemove(国家ID, out _);
-        }
-    });
-}
-
-/// <summary>
-/// 通知战场倒计时（通过WebSocket）
-/// </summary>
-async Task 通知战场倒计时(int 国家ID, int 家族1ID, int 家族2ID, int 剩余秒数)
-{
-    // 查询两个家族的所有玩家ID
-    using var connection = new MySqlConnection(数据库连接字符串);
-    await connection.OpenAsync();
-
-    var 玩家ID列表 = new List<int>();
-    
-    // 查询家族1的玩家
-    using (var cmd1 = new MySqlCommand("SELECT id FROM players WHERE clan_id = @clan_id", connection))
-    {
-        cmd1.Parameters.AddWithValue("@clan_id", 家族1ID);
-        using var reader1 = await cmd1.ExecuteReaderAsync();
-        while (await reader1.ReadAsync())
-        {
-            玩家ID列表.Add(reader1.GetInt32(0));
-        }
-    }
-
-    // 查询家族2的玩家
-    using (var cmd2 = new MySqlCommand("SELECT id FROM players WHERE clan_id = @clan_id", connection))
-    {
-        cmd2.Parameters.AddWithValue("@clan_id", 家族2ID);
-        using var reader2 = await cmd2.ExecuteReaderAsync();
-        while (await reader2.ReadAsync())
-        {
-            玩家ID列表.Add(reader2.GetInt32(0));
-        }
-    }
-
-    // 发送倒计时消息给所有在线玩家
-    var 倒计时事件 = new
-    {
-        eventType = "BattlefieldCountdown",
-        countryId = 国家ID,
-        remainingSeconds = 剩余秒数
-    };
-
-    string 消息内容 = JsonSerializer.Serialize(倒计时事件);
-    byte[] 消息字节 = Encoding.UTF8.GetBytes(消息内容);
-
-    int 成功发送数 = 0;
-    int 失败发送数 = 0;
-    int 不在线数 = 0;
-    
-    日志记录器.信息($"[战场倒计时通知] 开始发送倒计时通知：国家ID={国家ID}, 剩余秒数={剩余秒数}, 玩家总数={玩家ID列表.Count}, 在线连接数={玩家连接映射.Count}");
-    
-    foreach (var 玩家ID in 玩家ID列表)
-    {
-        if (玩家连接映射.TryGetValue(玩家ID, out var socket))
-        {
-            if (socket != null && socket.State == WebSocketState.Open)
-            {
-                try
-                {
-                    await socket.SendAsync(new ArraySegment<byte>(消息字节), WebSocketMessageType.Text, true, CancellationToken.None);
-                    成功发送数++;
-                    // 只在关键时刻记录详细日志，避免日志过多
-                    if (剩余秒数 == 30 || 剩余秒数 == 15 || 剩余秒数 <= 10)
-                    {
-                        日志记录器.信息($"[战场倒计时通知] 已发送给玩家 {玩家ID}，剩余 {剩余秒数} 秒");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    失败发送数++;
-                    日志记录器.错误($"[战场倒计时通知] 发送给玩家 {玩家ID} 失败: {ex.Message}");
-                }
-            }
-            else
-            {
-                不在线数++;
-                if (socket == null)
-                {
-                    日志记录器.警告($"[战场倒计时通知] 玩家 {玩家ID} 的连接对象为null");
-                }
-                else
-                {
-                    日志记录器.警告($"[战场倒计时通知] 玩家 {玩家ID} 的连接状态异常: {socket.State}");
-                }
-            }
-        }
-        else
-        {
-            不在线数++;
-            if (剩余秒数 == 30 || 剩余秒数 == 15 || 剩余秒数 <= 10)
-            {
-                日志记录器.警告($"[战场倒计时通知] 玩家 {玩家ID} 不在玩家连接映射中（可能未注册或已断开）");
-            }
-        }
-    }
-    
-    // 只在关键时刻或有问题时记录汇总日志
-    if (剩余秒数 == 30 || 剩余秒数 == 15 || 剩余秒数 <= 10 || 成功发送数 == 0 || 失败发送数 > 0)
-    {
-        日志记录器.信息($"[战场倒计时通知] 汇总：国家ID={国家ID}, 剩余秒数={剩余秒数}, 总玩家={玩家ID列表.Count}, 成功={成功发送数}, 不在线={不在线数}, 失败={失败发送数}");
-    }
-}
-
-/// <summary>
-/// 生成战场（倒计时结束后调用）
-/// </summary>
-async Task 生成战场(int 国家ID, int 家族1ID, int 家族2ID)
-{
-    using var connection = new MySqlConnection(数据库连接字符串);
-    await connection.OpenAsync();
-
-    using var transaction = await connection.BeginTransactionAsync();
-    try
-    {
-        // 更新战场状态为战斗中
-        using (var cmd = new MySqlCommand(
-            @"UPDATE battlefields 
-              SET battlefield_status = 'fighting', start_time = NOW() 
-              WHERE country_id = @country_id 
-                 AND battlefield_status = 'preparing'",
-            connection,
-            transaction))
-        {
-            cmd.Parameters.AddWithValue("@country_id", 国家ID);
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        // TODO: 这里以后实现具体的战场生成逻辑
-        // 例如：生成Boss、初始化积分等
-
-        await transaction.CommitAsync();
-        日志记录器.信息($"[战场] 国家 {国家ID} 的战场已生成");
-    }
-    catch (Exception ex)
-    {
-        await transaction.RollbackAsync();
-        日志记录器.错误($"[战场] 生成战场失败: {ex.Message}");
-    }
-}
-
 // =================== 消息处理函数 ===================
 
 // 处理消息（存储到数据库并广播）
@@ -5032,11 +4784,19 @@ public record JoinCountryResponse(bool Success, string Message);
 
 public record GetCountryInfoRequest(int CountryId);
 
-public record GetCountryInfoResponse(bool Success, string Message, int MemberCount, int Rank, int? WarClan1Id, string? WarClan1Name, int? WarClan2Id, string? WarClan2Name, DateTime? BattleStartTime);
+public record GetCountryInfoResponse(bool Success, string Message, int MemberCount, int Rank);
 
-public record DeclareWarRequest(int AccountId, int CountryId);
+public record DeclareWarRequest(int AccountId, int CountryId, int ClanId);
 
-public record DeclareWarResponse(bool Success, string Message, bool BothClansReady);
+public record DeclareWarResponse(bool Success, string Message, DeclareWarData? Data);
+
+public class DeclareWarData
+{
+    public int WarClan1Id { get; set; }
+    public string WarClan1Name { get; set; } = "";
+    public int WarClan2Id { get; set; }
+    public string WarClan2Name { get; set; } = "";
+}
 
 public record ChangeCountryRequest(int AccountId, int CountryId);
 

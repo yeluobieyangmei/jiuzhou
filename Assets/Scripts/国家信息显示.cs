@@ -444,6 +444,12 @@ public class 国家信息显示 : MonoBehaviour
             yield break;
         }
 
+        if (当前玩家.家族 == null || 当前玩家.家族.家族ID <= 0)
+        {
+            通用提示框.显示("您不属于任何家族，无法宣战");
+            yield break;
+        }
+
         int accountId = PlayerPrefs.GetInt("AccountId", -1);
         if (accountId <= 0)
         {
@@ -451,7 +457,7 @@ public class 国家信息显示 : MonoBehaviour
             yield break;
         }
 
-        string json数据 = $"{{\"accountId\":{accountId},\"countryId\":{当前玩家.国家.国家ID}}}";
+        string json数据 = $"{{\"accountId\":{accountId},\"countryId\":{当前玩家.国家.国家ID},\"clanId\":{当前玩家.家族.家族ID}}}";
         byte[] bodyRaw = Encoding.UTF8.GetBytes(json数据);
 
         using (UnityWebRequest 请求 = new UnityWebRequest(宣战接口地址, "POST"))
