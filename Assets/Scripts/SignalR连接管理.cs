@@ -19,7 +19,12 @@ public class SignalR连接管理 : MonoBehaviour
     public static SignalR连接管理 实例 { get; private set; }
 
     // WebSocket 服务器地址（对应服务端自建的 /ws 端点）
+    // 注意：如果是本地测试，请使用 "ws://localhost:5000/ws" 或 "ws://127.0.0.1:5000/ws"
+    // 如果是远程服务器，请使用 "ws://服务器IP:端口/ws"
     private string hubUrl = "ws://43.139.181.191:5000/ws";
+    
+    // 本地测试地址（如果需要，可以取消注释使用）
+    // private string hubUrl = "ws://localhost:5000/ws";
 
     // WebSocket 连接对象
     private ClientWebSocket webSocket;
@@ -184,35 +189,88 @@ public class SignalR连接管理 : MonoBehaviour
 
         try
         {
+            Debug.Log($"[WebSocket] 准备连接到服务器: {hubUrl}");
+            
             // 创建 WebSocket 客户端
             webSocket = new ClientWebSocket();
             cancellationTokenSource = new CancellationTokenSource();
 
-            // 连接到服务器
+            // 连接到服务器（设置超时时间）
             Uri serverUri = new Uri(hubUrl);
-            await webSocket.ConnectAsync(serverUri, cancellationTokenSource.Token);
+            Debug.Log($"[WebSocket] 正在连接... URI: {serverUri}");
+            
+            // 使用超时任务
+            var connectTask = webSocket.ConnectAsync(serverUri, cancellationTokenSource.Token);
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(10), cancellationTokenSource.Token);
+            
+            var completedTask = await Task.WhenAny(connectTask, timeoutTask);
+            
+            if (completedTask == timeoutTask)
+            {
+                throw new TimeoutException("WebSocket连接超时（10秒）");
+            }
+            
+            await connectTask; // 确保连接完成
+            
+            if (webSocket.State == WebSocketState.Open)
+            {
+                是否已连接 = true;
+                是否正在连接 = false;
+                是否正在重连 = false;
+                当前重连次数 = 0; // 重置重连次数
+                Debug.Log($"[WebSocket] ✓ 连接成功！状态: {webSocket.State}");
 
-            是否已连接 = true;
+                // 启动消息接收循环（在后台线程）
+                receiveTask = Task.Run(() => 接收消息循环(cancellationTokenSource.Token));
+
+                // 延迟注册玩家ID到服务器（确保玩家数据已加载）
+                StartCoroutine(延迟注册玩家ID());
+
+                // 启动心跳协程
+                启动心跳();
+
+                // 重连成功后同步数据
+                StartCoroutine(重连后同步数据());
+            }
+            else
+            {
+                throw new Exception($"WebSocket连接后状态异常: {webSocket.State}");
+            }
+        }
+        catch (System.Net.Sockets.SocketException ex)
+        {
+            Debug.LogError($"[WebSocket] 连接失败（网络错误）: {ex.Message}");
+            Debug.LogError($"[WebSocket] 错误代码: {ex.SocketErrorCode}");
+            Debug.LogError($"[WebSocket] 请检查：1. 服务端是否运行 2. 地址是否正确: {hubUrl} 3. 防火墙是否阻止");
             是否正在连接 = false;
-            是否正在重连 = false;
-            当前重连次数 = 0; // 重置重连次数
-            Debug.Log("WebSocket 连接成功");
-
-            // 启动消息接收循环（在后台线程）
-            receiveTask = Task.Run(() => 接收消息循环(cancellationTokenSource.Token));
-
-            // 延迟注册玩家ID到服务器（确保玩家数据已加载）
-            StartCoroutine(延迟注册玩家ID());
-
-            // 启动心跳协程
-            启动心跳();
-
-            // 重连成功后同步数据
-            StartCoroutine(重连后同步数据());
+            webSocket?.Dispose();
+            webSocket = null;
+            
+            // 连接失败后尝试重连
+            if (!是否正在重连 && 应用在前台)
+            {
+                尝试重连();
+            }
+        }
+        catch (TimeoutException ex)
+        {
+            Debug.LogError($"[WebSocket] 连接超时: {ex.Message}");
+            Debug.LogError($"[WebSocket] 请检查：1. 服务端是否运行 2. 网络是否正常 3. 地址是否正确: {hubUrl}");
+            是否正在连接 = false;
+            webSocket?.Dispose();
+            webSocket = null;
+            
+            // 连接失败后尝试重连
+            if (!是否正在重连 && 应用在前台)
+            {
+                尝试重连();
+            }
         }
         catch (Exception ex)
         {
-            Debug.LogError($"WebSocket 连接失败: {ex.Message}");
+            Debug.LogError($"[WebSocket] 连接失败: {ex.GetType().Name}: {ex.Message}");
+            Debug.LogError($"[WebSocket] 堆栈跟踪: {ex.StackTrace}");
+            Debug.LogError($"[WebSocket] 连接地址: {hubUrl}");
             是否正在连接 = false;
             webSocket?.Dispose();
             webSocket = null;
@@ -424,11 +482,21 @@ public class SignalR连接管理 : MonoBehaviour
         }
         catch (OperationCanceledException)
         {
-            Debug.Log("WebSocket 接收消息循环已取消");
+            Debug.Log("[WebSocket] 接收消息循环已取消（正常关闭）");
+        }
+        catch (System.Net.WebSockets.WebSocketException ex)
+        {
+            Debug.LogError($"[WebSocket] 接收消息错误（WebSocket异常）: {ex.Message}");
+            Debug.LogError($"[WebSocket] WebSocket状态: {ex.WebSocketErrorCode}");
+            if (ex.InnerException != null)
+            {
+                Debug.LogError($"[WebSocket] 内部异常: {ex.InnerException.Message}");
+            }
         }
         catch (Exception ex)
         {
-            Debug.LogError($"WebSocket 接收消息错误: {ex.Message}");
+            Debug.LogError($"[WebSocket] 接收消息错误: {ex.GetType().Name}: {ex.Message}");
+            Debug.LogError($"[WebSocket] 堆栈跟踪: {ex.StackTrace}");
         }
         finally
         {
@@ -539,8 +607,17 @@ public class SignalR连接管理 : MonoBehaviour
                     break;
                 case "BattlefieldCountdown":
                     var countdownEvent = JsonUtility.FromJson<BattlefieldCountdownEvent>(message);
-                    Debug.Log($"[WebSocket] 收到战场倒计时事件: 国家ID={countdownEvent?.countryId}, 剩余秒数={countdownEvent?.remainingSeconds}");
+                    Debug.Log($"[WebSocket] ========== 收到原始倒计时消息 ==========");
+                    Debug.Log($"[WebSocket] 原始消息内容: {message}");
+                    Debug.Log($"[WebSocket] 解析后 - 国家ID: {countdownEvent?.countryId}, 剩余秒数: {countdownEvent?.remainingSeconds}");
                     处理战场倒计时事件(countdownEvent);
+                    处理成功 = true;
+                    break;
+                case "BattlefieldCountdownEnd":
+                    var endEvent = JsonUtility.FromJson<BattlefieldCountdownEndEvent>(message);
+                    Debug.Log($"[WebSocket] ========== 收到倒计时结束消息 ==========");
+                    Debug.Log($"[WebSocket] 原始消息内容: {message}");
+                    处理战场倒计时结束事件(endEvent);
                     处理成功 = true;
                     break;
                 default:
@@ -885,8 +962,10 @@ public class SignalR连接管理 : MonoBehaviour
         }
     }
 
+
     /// <summary>
     /// 处理战场倒计时事件（从服务端WebSocket推送）
+    /// 客户端只接收信息并显示，不做任何本地逻辑处理
     /// </summary>
     private void 处理战场倒计时事件(BattlefieldCountdownEvent evt)
     {
@@ -915,174 +994,113 @@ public class SignalR连接管理 : MonoBehaviour
             return; // 不是当前玩家的国家，忽略
         }
         
-        Debug.Log($"[战场倒计时] 开始处理倒计时事件: 国家ID={evt.countryId}, 剩余秒数={evt.remainingSeconds}, 玩家ID={当前玩家.ID}, 家族ID={当前玩家.家族?.家族ID ?? -1}");
-
-        // 检查当前玩家是否属于宣战家族（通过检查本地数据）
-        bool 可能属于宣战家族 = false;
-        if (当前玩家.家族 != null && 当前玩家.国家 != null)
+        // 检查当前玩家是否属于宣战家族（使用服务端发送的家族ID）
+        bool 属于宣战家族 = false;
+        if (当前玩家.家族 != null)
         {
-            // 如果已经有宣战家族1或2的信息，检查是否匹配
-            if (当前玩家.国家.宣战家族1 != null && 当前玩家.家族.家族ID == 当前玩家.国家.宣战家族1.家族ID)
+            属于宣战家族 = (当前玩家.家族.家族ID == evt.clan1Id) || (当前玩家.家族.家族ID == evt.clan2Id);
+        }
+        
+        if (!属于宣战家族)
+        {
+            Debug.Log($"[战场倒计时] 玩家不属于宣战家族，忽略。玩家家族ID={当前玩家.家族?.家族ID ?? -1}, 宣战家族1={evt.clan1Id}, 宣战家族2={evt.clan2Id}");
+            return;
+        }
+        
+        // 在控制台每秒输出倒计时进度（重要：用于查看通信是否正常）
+        Debug.Log($"[战场倒计时] ========== 收到服务端倒计时广播 ==========");
+        Debug.Log($"[战场倒计时] 国家ID: {evt.countryId}, 剩余秒数: {evt.remainingSeconds}秒");
+        Debug.Log($"[战场倒计时] 家族1: {evt.clan1Name}({evt.clan1Id}) VS 家族2: {evt.clan2Name}({evt.clan2Id})");
+        Debug.Log($"[战场倒计时] 当前玩家ID: {当前玩家.ID}, 玩家家族ID: {当前玩家.家族.家族ID}");
+        Debug.Log($"[战场倒计时] ==========================================");
+
+        // 确保本地国家信息中的宣战家族信息已更新（使用服务端发送的数据）
+        if (当前玩家.国家.宣战家族1 == null || 当前玩家.国家.宣战家族1.家族ID != evt.clan1Id)
+        {
+            if (当前玩家.国家.宣战家族1 == null)
             {
-                可能属于宣战家族 = true;
+                当前玩家.国家.宣战家族1 = new 家族信息库();
             }
-            if (当前玩家.国家.宣战家族2 != null && 当前玩家.家族.家族ID == 当前玩家.国家.宣战家族2.家族ID)
+            当前玩家.国家.宣战家族1.家族ID = evt.clan1Id;
+            当前玩家.国家.宣战家族1.家族名字 = evt.clan1Name;
+        }
+        
+        if (当前玩家.国家.宣战家族2 == null || 当前玩家.国家.宣战家族2.家族ID != evt.clan2Id)
+        {
+            if (当前玩家.国家.宣战家族2 == null)
             {
-                可能属于宣战家族 = true;
+                当前玩家.国家.宣战家族2 = new 家族信息库();
             }
+            当前玩家.国家.宣战家族2.家族ID = evt.clan2Id;
+            当前玩家.国家.宣战家族2.家族名字 = evt.clan2Name;
         }
 
-        // 如果本地没有完整的宣战家族信息，先获取最新的国家信息
-        // 因为可能家族2刚宣战，家族1客户端还不知道
-        if (!可能属于宣战家族 || 当前玩家.国家.宣战家族1 == null || 当前玩家.国家.宣战家族2 == null)
+        // 客户端只接收信息并显示，不做任何本地倒计时逻辑处理
+        // 这里可以调用UI显示方法，例如显示倒计时UI
+        Debug.Log($"[战场倒计时] ✓ 倒计时已更新: 剩余 {evt.remainingSeconds} 秒");
+        
+        // TODO: 如果需要显示倒计时UI，可以在这里调用UI显示方法
+        // 例如：战场入口管理器.实例?.更新倒计时显示(evt.remainingSeconds);
+    }
+
+    /// <summary>
+    /// 处理战场倒计时结束事件（从服务端WebSocket推送）
+    /// </summary>
+    private void 处理战场倒计时结束事件(BattlefieldCountdownEndEvent evt)
+    {
+        if (evt == null || evt.countryId <= 0)
         {
-            Debug.Log($"收到战场倒计时事件，但本地宣战信息不完整，先获取最新国家信息。家族1: {当前玩家.国家.宣战家族1?.家族名字 ?? "null"}, 家族2: {当前玩家.国家.宣战家族2?.家族名字 ?? "null"}");
-            
-            // 主动获取最新的国家信息（这会更新宣战家族信息，然后自动启动倒计时）
-            StartCoroutine(获取最新国家信息并启动倒计时(evt.countryId, evt.remainingSeconds));
+            Debug.LogWarning($"[战场倒计时] 结束事件无效: evt={evt?.countryId ?? -1}");
             return;
         }
 
-        // 如果本地信息完整，直接同步倒计时
-        if (战场管理器.实例 != null)
+        玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
+        if (当前玩家 == null)
         {
-            Debug.Log($"[战场倒计时] 本地信息完整，直接同步倒计时: 剩余 {evt.remainingSeconds} 秒");
-            战场管理器.实例.同步服务端倒计时(当前玩家.国家, evt.remainingSeconds);
+            Debug.LogWarning("[战场倒计时] 当前玩家数据为空");
+            return;
+        }
+        
+        if (当前玩家.国家 == null)
+        {
+            Debug.LogWarning("[战场倒计时] 当前玩家没有国家信息");
+            return;
+        }
+        
+        if (当前玩家.国家.国家ID != evt.countryId)
+        {
+            Debug.Log($"[战场倒计时] 国家ID不匹配: 当前国家ID={当前玩家.国家.国家ID}, 事件国家ID={evt.countryId}，忽略");
+            return;
+        }
+        
+        // 检查当前玩家是否属于宣战家族
+        bool 属于宣战家族 = false;
+        if (当前玩家.家族 != null)
+        {
+            属于宣战家族 = (当前玩家.家族.家族ID == evt.clan1Id) || (当前玩家.家族.家族ID == evt.clan2Id);
+        }
+        
+        if (!属于宣战家族)
+        {
+            Debug.Log($"[战场倒计时] 玩家不属于宣战家族，忽略。玩家家族ID={当前玩家.家族?.家族ID ?? -1}, 宣战家族1={evt.clan1Id}, 宣战家族2={evt.clan2Id}");
+            return;
+        }
+        
+        Debug.Log($"[战场倒计时] ========== 倒计时结束 ==========");
+        Debug.Log($"[战场倒计时] 国家ID: {evt.countryId}");
+        Debug.Log($"[战场倒计时] 家族1: {evt.clan1Name}({evt.clan1Id}) VS 家族2: {evt.clan2Name}({evt.clan2Id})");
+        Debug.Log($"[战场倒计时] 当前玩家ID: {当前玩家.ID}, 玩家家族ID: {当前玩家.家族.家族ID}");
+        Debug.Log($"[战场倒计时] ==========================================");
+
+        // 显示战场入口窗口
+        if (战场入口管理器.实例 != null && 战场入口管理器.实例.窗口对象 != null)
+        {
+            战场入口管理器.实例.窗口对象.SetActive(true);
+            Debug.Log($"[战场倒计时] ✓ 已显示战场入口窗口");
         }
         else
         {
-            Debug.LogWarning("[战场倒计时] 战场管理器实例为空，无法同步倒计时");
-        }
-    }
-
-    /// <summary>
-    /// 获取最新国家信息并启动倒计时（用于处理倒计时事件时本地信息不完整的情况）
-    /// </summary>
-    private System.Collections.IEnumerator 获取最新国家信息并启动倒计时(int 国家ID, int 剩余秒数)
-    {
-        // 使用 UnityWebRequest 获取最新国家信息
-        string 获取国家信息地址 = "http://43.139.181.191:5000/api/getCountryInfo";
-        string json数据 = $"{{\"countryId\":{国家ID}}}";
-        byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(json数据);
-
-        using (UnityWebRequest 请求 = new UnityWebRequest(获取国家信息地址, "POST"))
-        {
-            请求.uploadHandler = new UploadHandlerRaw(bodyRaw);
-            请求.downloadHandler = new DownloadHandlerBuffer();
-            请求.SetRequestHeader("Content-Type", "application/json; charset=utf-8");
-
-            yield return 请求.SendWebRequest();
-
-            if (请求.result == UnityWebRequest.Result.ConnectionError ||
-                请求.result == UnityWebRequest.Result.ProtocolError)
-            {
-                Debug.LogError($"获取国家信息失败: {请求.error}");
-                yield break;
-            }
-
-            string 返回文本 = 请求.downloadHandler.text;
-            Debug.Log($"获取最新国家信息响应: {返回文本}");
-
-            var 响应 = JsonUtility.FromJson<获取国家信息响应>(返回文本);
-            if (响应 != null && 响应.success)
-            {
-                玩家数据 当前玩家 = 玩家数据管理.实例?.当前玩家数据;
-                if (当前玩家 != null && 当前玩家.国家 != null && 当前玩家.国家.国家ID == 国家ID)
-                {
-                    // 直接手动同步宣战家族信息（确保数据同步）
-                    手动同步宣战家族信息(当前玩家.国家, 响应);
-                    
-                    // 如果存在国家信息显示组件，也调用它的同步方法以更新UI
-                    var 国家信息显示组件 = UnityEngine.Object.FindObjectOfType<国家信息显示>();
-                    if (国家信息显示组件 != null)
-                    {
-                        // 使用反射调用私有方法
-                        var 方法 = typeof(国家信息显示).GetMethod("同步宣战家族信息", 
-                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        if (方法 != null)
-                        {
-                            方法.Invoke(国家信息显示组件, new object[] { 当前玩家.国家, 响应 });
-                        }
-                    }
-
-                    // 等待一帧，确保数据同步完成
-                    yield return null;
-
-                    // 现在检查是否属于宣战家族
-                    bool 属于宣战家族 = false;
-                    if (当前玩家.家族 != null && 当前玩家.国家.宣战家族1 != null && 当前玩家.国家.宣战家族2 != null)
-                    {
-                        属于宣战家族 = (当前玩家.家族.家族ID == 当前玩家.国家.宣战家族1.家族ID) ||
-                                      (当前玩家.家族.家族ID == 当前玩家.国家.宣战家族2.家族ID);
-                    }
-
-                    if (属于宣战家族 && 战场管理器.实例 != null)
-                    {
-                        // 同步服务端倒计时
-                        战场管理器.实例.同步服务端倒计时(当前玩家.国家, 剩余秒数);
-                        Debug.Log($"[战场倒计时] 已获取最新国家信息并启动倒计时: 剩余 {剩余秒数} 秒，家族1={当前玩家.国家.宣战家族1?.家族名字 ?? "null"}, 家族2={当前玩家.国家.宣战家族2?.家族名字 ?? "null"}");
-                    }
-                    else
-                    {
-                        if (!属于宣战家族)
-                        {
-                            Debug.LogWarning($"[战场倒计时] 获取最新信息后，玩家不属于宣战家族。玩家家族ID={当前玩家.家族?.家族ID ?? -1}, 宣战家族1={当前玩家.国家.宣战家族1?.家族ID ?? -1}, 宣战家族2={当前玩家.国家.宣战家族2?.家族ID ?? -1}");
-                        }
-                        if (战场管理器.实例 == null)
-                        {
-                            Debug.LogError("[战场倒计时] 战场管理器实例为空");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// 手动同步宣战家族信息（当找不到国家信息显示组件时使用）
-    /// </summary>
-    private void 手动同步宣战家族信息(国家信息库 当前国家, 获取国家信息响应 响应)
-    {
-        // 同步宣战家族1
-        if (响应.warClan1Id > 0 && !string.IsNullOrEmpty(响应.warClan1Name))
-        {
-            if (当前国家.宣战家族1 == null || 当前国家.宣战家族1.家族ID != 响应.warClan1Id)
-            {
-                当前国家.宣战家族1 = 全局方法类.获取指定ID的家族(响应.warClan1Id);
-                if (当前国家.宣战家族1 == null)
-                {
-                    当前国家.宣战家族1 = new 国家系统.家族信息库
-                    {
-                        家族ID = 响应.warClan1Id,
-                        家族名字 = 响应.warClan1Name
-                    };
-                }
-            }
-        }
-        else
-        {
-            当前国家.宣战家族1 = null;
-        }
-
-        // 同步宣战家族2
-        if (响应.warClan2Id > 0 && !string.IsNullOrEmpty(响应.warClan2Name))
-        {
-            if (当前国家.宣战家族2 == null || 当前国家.宣战家族2.家族ID != 响应.warClan2Id)
-            {
-                当前国家.宣战家族2 = 全局方法类.获取指定ID的家族(响应.warClan2Id);
-                if (当前国家.宣战家族2 == null)
-                {
-                    当前国家.宣战家族2 = new 国家系统.家族信息库
-                    {
-                        家族ID = 响应.warClan2Id,
-                        家族名字 = 响应.warClan2Name
-                    };
-                }
-            }
-        }
-        else
-        {
-            当前国家.宣战家族2 = null;
+            Debug.LogWarning("[战场倒计时] 战场入口管理器实例或窗口对象为空，无法显示窗口");
         }
     }
 
@@ -1384,6 +1402,20 @@ public class SystemMessageEvent : GameEventMessage
 public class BattlefieldCountdownEvent : GameEventMessage
 {
     public int countryId;
+    public int clan1Id;
+    public string clan1Name;
+    public int clan2Id;
+    public string clan2Name;
     public int remainingSeconds;
+}
+
+[System.Serializable]
+public class BattlefieldCountdownEndEvent : GameEventMessage
+{
+    public int countryId;
+    public int clan1Id;
+    public string clan1Name;
+    public int clan2Id;
+    public string clan2Name;
 }
 

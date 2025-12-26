@@ -573,7 +573,7 @@ public class 玩家数据管理 : MonoBehaviour
                     }
                     else
                     {
-                        Debug.Log("心跳成功");
+                        //Debug.Log("心跳成功");
                         
                         // 检查家族ID是否有变化（用于检测被踢出家族等情况）
                         if (当前玩家数据 != null)
