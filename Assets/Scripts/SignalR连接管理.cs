@@ -1036,11 +1036,32 @@ public class SignalR连接管理 : MonoBehaviour
         }
 
         // 客户端只接收信息并显示，不做任何本地倒计时逻辑处理
-        // 这里可以调用UI显示方法，例如显示倒计时UI
         Debug.Log($"[战场倒计时] ✓ 倒计时已更新: 剩余 {evt.remainingSeconds} 秒");
         
-        // TODO: 如果需要显示倒计时UI，可以在这里调用UI显示方法
-        // 例如：战场入口管理器.实例?.更新倒计时显示(evt.remainingSeconds);
+        // 更新战场入口管理器的倒计时信息
+        if (战场入口管理器.实例 != null)
+        {
+            战场入口管理器.实例.更新倒计时信息(evt.remainingSeconds, evt.clan1Name, evt.clan2Name);
+            Debug.Log($"[战场倒计时] 已更新战场入口管理器，剩余秒数: {evt.remainingSeconds}");
+        }
+        else
+        {
+            Debug.LogWarning("[战场倒计时] 战场入口管理器.实例为null，无法更新倒计时信息");
+        }
+
+        // 当倒计时还剩15秒时，显示窗口并隐藏进入战场按钮
+        if (evt.remainingSeconds == 15)
+        {
+            if (战场入口管理器.实例 != null)
+            {
+                战场入口管理器.实例.显示窗口();
+                Debug.Log("[战场倒计时] 倒计时剩余15秒，已显示窗口并隐藏进入战场按钮");
+            }
+            else
+            {
+                Debug.LogWarning("[战场倒计时] 倒计时剩余15秒，但战场入口管理器.实例为null，无法显示窗口");
+            }
+        }
     }
 
     /// <summary>
@@ -1092,15 +1113,15 @@ public class SignalR连接管理 : MonoBehaviour
         Debug.Log($"[战场倒计时] 当前玩家ID: {当前玩家.ID}, 玩家家族ID: {当前玩家.家族.家族ID}");
         Debug.Log($"[战场倒计时] ==========================================");
 
-        // 显示战场入口窗口
-        if (战场入口管理器.实例 != null && 战场入口管理器.实例.窗口对象 != null)
+        // 标记倒计时结束，这会显示进入战场按钮并更新文本
+        if (战场入口管理器.实例 != null)
         {
-            战场入口管理器.实例.窗口对象.SetActive(true);
-            Debug.Log($"[战场倒计时] ✓ 已显示战场入口窗口");
+            战场入口管理器.实例.标记倒计时结束();
+            Debug.Log($"[战场倒计时] ✓ 已标记倒计时结束，进入战场按钮已显示");
         }
         else
         {
-            Debug.LogWarning("[战场倒计时] 战场入口管理器实例或窗口对象为空，无法显示窗口");
+            Debug.LogWarning("[战场倒计时] 战场入口管理器实例为空，无法处理倒计时结束");
         }
     }
 

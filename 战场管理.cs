@@ -256,10 +256,13 @@ public static class 战场管理
                 
                 日志记录器.LogInformation($"[战场管理] 倒计时任务已进入循环，开始时间: {开始时间}, 结束时间: {结束时间}");
                 
-                // 等待1秒，给客户端时间注册WebSocket连接
-                await Task.Delay(1000, 取消令牌源.Token);
+                // 等待3秒，给客户端时间注册WebSocket连接和玩家ID
+                // 客户端连接后需要1秒延迟，再等待玩家数据加载，所以需要更长的等待时间
+                日志记录器.LogInformation($"[战场管理] 等待3秒，让客户端有时间注册玩家ID...");
+                await Task.Delay(3000, 取消令牌源.Token);
                 
-                日志记录器.LogInformation($"[战场管理] 延迟1秒完成，开始广播循环");
+                日志记录器.LogInformation($"[战场管理] 延迟3秒完成，当前连接映射中的玩家ID: {string.Join(", ", 玩家连接映射.Keys)}");
+                日志记录器.LogInformation($"[战场管理] 开始广播循环");
                 
                 // 每秒广播一次倒计时
                 while (!取消令牌源.Token.IsCancellationRequested)
@@ -354,6 +357,7 @@ public static class 战场管理
             日志记录器.LogInformation($"[战场管理] 查询到玩家总数: {玩家ID列表.Count} (家族1: {家族1ID}, 家族2: {家族2ID})");
             日志记录器.LogInformation($"[战场管理] 玩家ID列表: {string.Join(", ", 玩家ID列表)}");
             日志记录器.LogInformation($"[战场管理] 当前连接映射中的玩家ID数量: {玩家连接映射.Count}");
+            日志记录器.LogInformation($"[战场管理] 连接映射中的玩家ID列表: {string.Join(", ", 玩家连接映射.Keys)}");
 
             // 构建广播事件
             var 倒计时事件 = new
